@@ -41,8 +41,13 @@ output is an on-screen overlay plus a structured per-frame record on disk.
 ```
 
 The pipeline runs as **three threads** — capture (decode), inference
-(detect + track + lock), and display/UI — connected by small bounded queues, so a
-slow inference frame never stalls decoding or makes the window choppy.
+(detect + track + lock), and display/UI. Crucially, the **display is decoupled
+from inference**: every decoded frame is shown at a steady video cadence (the
+source fps, capped at 60) with the *most recent* detection painted on top, while
+inference consumes only the newest frame and drops stale ones. So playback stays
+smooth even though a frame's detection cost swings from ~5 ms (locked ROI) to
+~20 ms (full SAHI) — the video never waits for inference, and a slow frame only
+leaves the overlay one tick stale, which the lock's velocity prediction hides.
 
 ---
 
@@ -229,9 +234,9 @@ RTSP URL, or a camera index like `0`).
 | `--start N` | Seek to frame N before starting. |
 | `--record FILE` | Write the annotated video to FILE (e.g. `out.mp4`). |
 | `--loop` | Restart the stream when it ends. |
-| `--profile` | Print pipeline timing (capture / infer / draw / show ms) to stderr every 120 frames. |
+| `--profile` | Print pipeline timing (display fps / capture / infer / detection fps / draw / show ms) to stderr every 120 frames. |
 | `--autolock` | Automatically lock the largest/most-central track — for centered tracking or headless runs. |
-| `--display-fps N` | Cap display to N fps for smooth playback (default 30; `0` = uncapped, for benchmarking). |
+| `--display-fps N` | Pace the **video** to N fps (default: source fps, capped at 60; `0` = uncapped, for benchmarking). The display is decoupled from inference, so this sets the video cadence — the overlay updates independently at whatever rate detection manages. |
 | `--zoom` | Show a magnified side panel of the locked target. |
 | `--zoom-width N` | Width of the zoom side panel in px (default 360). |
 

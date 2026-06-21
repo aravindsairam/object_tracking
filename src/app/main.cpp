@@ -34,23 +34,65 @@ bool ends_with(const std::string& s, const std::string& suf) {
     return s.size() >= suf.size() && s.compare(s.size() - suf.size(), suf.size(), suf) == 0;
 }
 
-// A decoded working-resolution frame handed from the capture thread to inference.
+double dur_ms(std::chrono::steady_clock::time_point a,
+              std::chrono::steady_clock::time_point b) {
+    return std::chrono::duration<double, std::milli>(b - a).count();
+}
+
+// A decoded working-resolution frame. Used both for the capture->inference tap
+// (newest-wins, via push_latest) and the capture->display stream (every frame).
 struct CapturedFrame {
-    int64_t  index = 0;
-    cv::Mat  img;
+    int64_t index = 0;
+    cv::Mat img;
 };
 
-// Inference output handed to the display thread. Owns its frame outright (the
-// frame flows capture -> infer -> display, each stage the sole owner, so there
-// is no shared buffer and no clone needed).
-struct ShownFrame {
-    cv::Mat               img;
+// The inference thread's latest output, latched for the display thread to read.
+//
+// The display runs at a steady video cadence and inference runs at its own
+// (variable) rate, so the display reads whatever the MOST RECENT detection result
+// is and paints it onto the live frame. This is what decouples smooth playback
+// from inference jitter: the video never waits for a detection. A slow inference
+// frame just means the overlay is one tick stale, which LockManager's velocity
+// prediction already smooths over.
+struct SharedResult {
+    std::mutex             m;
     std::vector<ot::Track> tracks;
-    ot::TargetState       target;
-    bool                  locked = false;
-    bool                  roi = false;   // detection ran on the locked ROI fast-path
-    int64_t               index = 0;
-    double                infer_ms = 0.0;
+    ot::TargetState        target;
+    bool                   locked = false;
+    bool                   roi = false;     // detection ran on the locked ROI fast-path
+    bool                   valid = false;   // false until the first detection lands
+    int64_t                src_index = -1;  // frame index this result was computed from
+    double                 infer_ms = 0.0;  // detect+track stage time
+    double                 det_fps = 0.0;   // inference loop rate (EMA)
+
+    void set(std::vector<ot::Track> t, const ot::TargetState& tg, bool lk, bool roi_,
+             int64_t idx, double ims, double dfps) {
+        std::lock_guard<std::mutex> g(m);
+        tracks = std::move(t);
+        target = tg;
+        locked = lk;
+        roi = roi_;
+        valid = true;
+        src_index = idx;
+        infer_ms = ims;
+        det_fps = dfps;
+    }
+
+    // Snapshot the latest result for one display frame. Returns false until the
+    // first detection has landed (so the very first frames show clean video).
+    bool get(std::vector<ot::Track>& t, ot::TargetState& tg, bool& lk, bool& roi_,
+             int64_t& idx, double& ims, double& dfps) {
+        std::lock_guard<std::mutex> g(m);
+        if (!valid) return false;
+        t = tracks;
+        tg = target;
+        lk = locked;
+        roi_ = roi;
+        idx = src_index;
+        ims = infer_ms;
+        dfps = det_fps;
+        return true;
+    }
 };
 
 // Predicted search window around the locked target for the ROI fast-path: a
@@ -114,7 +156,7 @@ int main(int argc, char** argv) {
             "  --loop         restart at end of stream\n"
             "  --profile      print pipeline timing to stderr every 120 frames\n"
             "  --autolock     auto-lock the most central track (centered tracking / headless)\n"
-            "  --display-fps N  cap display to N fps for smooth playback (default: 30; 0=uncapped)\n"
+            "  --display-fps N  cap display to N fps (default: source fps, max 60; 0=uncapped)\n"
             "  --zoom         show a magnified side panel of the locked target\n"
             "  --zoom-width N width of the zoom side panel in px (default: 360)\n"
             "  keys:  click=lock  r=reset  space=pause  s=screenshot  q/ESC=quit\n",
@@ -129,7 +171,7 @@ int main(int argc, char** argv) {
     bool loop = false;
     bool profile = false;
     bool autolock = false;
-    double display_fps = -1.0;     // -1 = match source fps; 0 = uncapped (benchmark)
+    double display_fps = -1.0;     // -1 = match source fps (capped at 60); 0 = uncapped (benchmark)
     bool zoom = false;             // show a magnified side panel of the locked target
     int  zoom_w = 360;             // zoom side-panel width in px
     for (int i = 2; i < argc; ++i) {
@@ -197,16 +239,21 @@ int main(int argc, char** argv) {
         std::printf("[run] click a target to lock.  keys: r=reset space=pause s=shot q=quit\n");
 
         // ---- pipeline state -------------------------------------------------
-        ot::BoundedQueue<CapturedFrame> cap_q(3);   // capture -> inference
-        ot::BoundedQueue<ShownFrame>    disp_q(3);   // inference -> display
+        // The capture thread feeds TWO consumers: the display gets EVERY decoded
+        // frame (blocking push -> backpressure paces capture to the display rate),
+        // while inference gets only the NEWEST frame (push_latest drops stale ones,
+        // so a slow detection never backs up decoding). Inference publishes its
+        // result to `result`, which the display latches onto the live video.
+        ot::BoundedQueue<CapturedFrame> infer_q(1);   // capture -> inference (newest-wins)
+        ot::BoundedQueue<CapturedFrame> disp_q(3);    // capture -> display  (every frame)
+        SharedResult       result;
         UiCommands         cmds;
         std::atomic<bool>  running{true};
         std::atomic<bool>  paused{false};
         std::atomic<double> cap_ms{0.0};   // capture(decode) stage EMA, for --profile
 
-        // ---- capture thread: decode -> cap_q -------------------------------
+        // ---- capture thread: decode -> {infer_q (newest), disp_q (all)} ----
         std::thread capture([&] {
-            int64_t idx = 0;
             double ema = 0.0;
             cv::Mat frame;
             while (running.load()) {
@@ -216,29 +263,36 @@ int main(int argc, char** argv) {
                 }
                 const auto t0 = std::chrono::steady_clock::now();
                 const bool ok = source.read(frame);
-                const double rms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
+                const double rms = dur_ms(t0, std::chrono::steady_clock::now());
                 ema = ema == 0.0 ? rms : 0.9 * ema + 0.1 * rms;
                 cap_ms.store(ema);
                 if (!ok) {                                  // end of stream
                     if (loop && source.seek(0)) { cmds.post_reset(); continue; }
                     break;
                 }
-                idx = source.frame_index();
-                if (!cap_q.push({idx, std::move(frame)})) break;  // closed -> quitting
-                frame = cv::Mat();                          // fresh buffer for next read
+                const int64_t idx = source.frame_index();
+                // Hand the freshest frame to inference (read-only share, newest-wins)...
+                infer_q.push_latest({idx, frame});
+                // ...and an independent copy to the display path (it draws overlays
+                // on it). The clone keeps inference's frame pristine while display
+                // mutates its own; a 1080p copy is ~0.5 ms, well inside capture's budget.
+                if (!disp_q.push({idx, frame.clone()})) break;   // closed -> quitting
+                frame = cv::Mat();                          // release; the infer slot owns the buffer
             }
-            cap_q.close();
+            infer_q.close();
+            disp_q.close();
         });
 
-        // ---- inference thread: cap_q -> detect/track/lock -> disp_q --------
+        // ---- inference thread: infer_q -> detect/track/lock -> result ------
         std::thread infer([&] {
             CapturedFrame in;
             ot::TargetState last_target;     // previous frame's lock state, drives the ROI crop
             int64_t infer_frame = 0;
             const int full_every = std::max(1, cfg.lock.roi_full_interval);
+            double det_ema = 0.0;
+            auto t_prev = std::chrono::steady_clock::now();
             while (running.load()) {
-                if (!cap_q.pop(in)) break;                  // closed + drained
+                if (!infer_q.pop(in)) break;                // closed + drained
 
                 bool do_reset = false, do_click = false;
                 cv::Point2f click;
@@ -269,8 +323,7 @@ int main(int argc, char** argv) {
                     dets = detector->detect(in.img);        // full-frame SAHI
                 }
                 auto tracks = tracker.update(in.img, dets);
-                const double infer_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - t0).count();
+                const double infer_ms = dur_ms(t0, std::chrono::steady_clock::now());
 
                 if (do_click) {
                     lock.select(click, in.img, tracks);
@@ -293,98 +346,106 @@ int main(int argc, char** argv) {
                     sink->write(target);
                 }
 
-                ShownFrame out;
-                out.img = std::move(in.img);
-                out.tracks = std::move(tracks);
-                out.target = target;
-                out.locked = locked;
-                out.roi = use_roi;
-                out.index = in.index;
-                out.infer_ms = infer_ms;
-                if (!disp_q.push(std::move(out))) break;    // closed -> quitting
+                const auto now = std::chrono::steady_clock::now();
+                const double dms = dur_ms(t_prev, now);
+                t_prev = now;
+                det_ema = det_ema == 0.0 ? dms : 0.9 * det_ema + 0.1 * dms;
+
+                result.set(std::move(tracks), target, locked, use_roi, in.index, infer_ms,
+                           det_ema > 0 ? 1000.0 / det_ema : 0.0);
             }
-            disp_q.close();
         });
 
         // ---- display + UI: main thread (HighGUI must run here) -------------
-        auto ms = [](std::chrono::steady_clock::time_point a,
-                     std::chrono::steady_clock::time_point b) {
-            return std::chrono::duration<double, std::milli>(b - a).count();
-        };
-        ShownFrame shown;
-        bool have_shown = false;
-        double ema_ms = 0.0, ema_disp_ms = 0.0, ema_draw = 0.0, ema_show = 0.0;
-        auto last_show = std::chrono::steady_clock::now();
-        long prof_n = 0;
-
-        // Frame pacing: present at a steady rate so playback is smooth instead of
-        // rushing on cheap ROI frames (~90fps) and lurching on full-SAHI frames
-        // (~45fps). Default caps to a steady 30 fps — comfortably under the
-        // worst-case (unlocked full-SAHI) sustainable rate, so it's smooth in
-        // every mode. Raise with --display-fps N; --display-fps 0 uncaps.
-        const double eff_fps = display_fps < 0.0 ? std::min(30.0, fps) : display_fps;
+        // Pace the VIDEO to a steady cadence (default: source fps, capped at 60)
+        // and paint the latest available detection on each frame. Because the
+        // video no longer waits for inference, playback stays smooth regardless of
+        // the 5ms ROI / 22ms full-SAHI swing underneath. --display-fps 0 uncaps.
+        const double eff_fps = display_fps < 0.0 ? std::min(60.0, fps) : display_fps;
         const double interval_ms = eff_fps > 0.0 ? 1000.0 / eff_fps : 0.0;
-        auto last_present = std::chrono::steady_clock::now();
         if (interval_ms > 0.0)
             std::printf("[run] display paced to %.1f fps (use --display-fps 0 to uncap)\n", eff_fps);
 
+        CapturedFrame shown;             // last composed frame (re-shown while paused)
+        bool have_shown = false;
+        double ema_disp_ms = 0.0, ema_ms = 0.0, ema_draw = 0.0, ema_show = 0.0;
+        double last_det_fps = 0.0;
+        auto last_show = std::chrono::steady_clock::now();
+        auto last_present = std::chrono::steady_clock::now();
+        long prof_n = 0;
+
         while (running.load()) {
-            ShownFrame d;
-            const int got = disp_q.pop_for(d, std::chrono::milliseconds(30));
+            CapturedFrame df;
+            const int got = disp_q.pop_for(df, std::chrono::milliseconds(30));
             if (got == -1) break;                           // pipeline drained (EOF)
 
             const bool fresh = (got == 1);
             if (fresh) {
                 const auto now = std::chrono::steady_clock::now();
-                const double dms = ms(last_show, now);
+                const double dms = dur_ms(last_show, now);
                 last_show = now;
                 ema_disp_ms = ema_disp_ms == 0.0 ? dms : 0.9 * ema_disp_ms + 0.1 * dms;
-                ema_ms = ema_ms == 0.0 ? d.infer_ms : 0.9 * ema_ms + 0.1 * d.infer_ms;
+
+                // Latch the most recent detection result onto this live frame.
+                std::vector<ot::Track> tracks;
+                ot::TargetState target;
+                bool r_locked = false, r_roi = false;
+                int64_t r_idx = -1;
+                double r_infer_ms = 0.0, r_det_fps = 0.0;
+                const bool have_res = result.get(tracks, target, r_locked, r_roi,
+                                                 r_idx, r_infer_ms, r_det_fps);
+                if (have_res) {
+                    ema_ms = ema_ms == 0.0 ? r_infer_ms : 0.9 * ema_ms + 0.1 * r_infer_ms;
+                    last_det_fps = r_det_fps;
+                }
 
                 // Grab the clean (un-annotated) crop around the locked target for
                 // the zoom panel BEFORE overlays are drawn, so the magnified view
                 // shows the actual object rather than chunky overlay lines.
                 cv::Mat zoom_crop;
                 cv::Rect zoom_src;
-                if (zoom && d.locked) {
-                    zoom_src = ot::zoom_crop_rect(d.target.box, W, H);
-                    if (zoom_src.area() > 0) zoom_crop = d.img(zoom_src).clone();
+                if (zoom && have_res && r_locked) {
+                    zoom_src = ot::zoom_crop_rect(target.box, W, H);
+                    if (zoom_src.area() > 0) zoom_crop = df.img(zoom_src).clone();
                 }
 
                 const auto td0 = std::chrono::steady_clock::now();
-                ot::draw_tracks(d.img, d.tracks, class_map, /*thin=*/d.locked);
-                if (d.locked) ot::draw_locked_target(d.img, d.target, class_map);
+                if (have_res) {
+                    ot::draw_tracks(df.img, tracks, class_map, /*thin=*/r_locked);
+                    if (r_locked) ot::draw_locked_target(df.img, target, class_map);
+                }
 
-                char hud[224];
-                const char* hint = d.target.state == ot::LockState::Lost
+                char hud[256];
+                const char* hint = !have_res ? "warming up"
+                                 : target.state == ot::LockState::Lost
                                        ? "LOST - searching (click/r)"
-                                       : d.locked ? (d.roi ? "LOCK (roi)" : "LOCK (full)")
+                                       : r_locked ? (r_roi ? "LOCK (roi)" : "LOCK (full)")
                                                   : "click a target to lock";
                 std::snprintf(hud, sizeof(hud),
-                              "frame %lld  trk %zu  infer %.0f ms  %.1f fps  %s%s",
-                              static_cast<long long>(d.index), d.tracks.size(), ema_ms,
+                              "frame %lld  trk %zu  infer %.0f ms  det %.0f fps  disp %.1f fps  %s%s",
+                              static_cast<long long>(df.index), tracks.size(), ema_ms, last_det_fps,
                               ema_disp_ms > 0 ? 1000.0 / ema_disp_ms : 0.0,
                               hint, paused.load() ? "  [PAUSED]" : "");
-                cv::putText(d.img, hud, {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0, 255, 0}, 2);
-                const double draw_ms = ms(td0, std::chrono::steady_clock::now());
+                cv::putText(df.img, hud, {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0, 255, 0}, 2);
+                const double draw_ms = dur_ms(td0, std::chrono::steady_clock::now());
                 ema_draw = ema_draw == 0.0 ? draw_ms : 0.9 * ema_draw + 0.1 * draw_ms;
 
-                if (recorder) recorder->write(d.img);   // record the W x H main frame only
-                shown = std::move(d);
-                have_shown = true;
+                if (recorder) recorder->write(df.img);   // record the W x H main frame only
 
                 // Compose main frame + zoom panel side by side for display. The
                 // panel shows a placeholder when nothing is locked, so the output
                 // size stays constant (no window flicker) and screenshots ('s')
                 // capture the full view.
                 if (zoom) {
-                    cv::Mat panel = ot::render_zoom_panel(zoom_crop, zoom_src, shown.target,
-                                                          shown.locked, class_map, zoom_w, H);
-                    cv::Mat canvas(H, disp_w, shown.img.type());
-                    shown.img.copyTo(canvas(cv::Rect(0, 0, W, H)));
+                    cv::Mat panel = ot::render_zoom_panel(zoom_crop, zoom_src, target,
+                                                          have_res && r_locked, class_map, zoom_w, H);
+                    cv::Mat canvas(H, disp_w, df.img.type());
+                    df.img.copyTo(canvas(cv::Rect(0, 0, W, H)));
                     panel.copyTo(canvas(cv::Rect(W, 0, zoom_w, H)));
-                    shown.img = std::move(canvas);
+                    df.img = std::move(canvas);
                 }
+                shown = std::move(df);
+                have_shown = true;
             }
 
             // Re-show the last frame on timeout so the window stays live (e.g.
@@ -394,15 +455,15 @@ int main(int argc, char** argv) {
             cv::Point2f click;
             // Ignore clicks that land in the zoom side panel (x >= W).
             if (selector.poll(click) && click.x < static_cast<float>(W)) cmds.post_click(click);
-            const double show_ms = ms(ts0, std::chrono::steady_clock::now());
+            const double show_ms = dur_ms(ts0, std::chrono::steady_clock::now());
             ema_show = ema_show == 0.0 ? show_ms : 0.9 * ema_show + 0.1 * show_ms;
 
             // Pace: hold this frame until its scheduled slot. waitKey is both the
             // wait and the GUI/key pump (returns early on a keypress). The bounded
-            // queues buffer inference-time variance so the cadence stays steady.
+            // disp_q buffers decode-time variance so the cadence stays steady.
             int pace_ms = 1;
             if (interval_ms > 0.0) {
-                const double since = ms(last_present, std::chrono::steady_clock::now());
+                const double since = dur_ms(last_present, std::chrono::steady_clock::now());
                 if (since < interval_ms) pace_ms = std::max(1, static_cast<int>(std::lround(interval_ms - since)));
             }
             const int key = cv::waitKey(pace_ms) & 0xFF;
@@ -410,9 +471,9 @@ int main(int argc, char** argv) {
 
             if (fresh && profile && ++prof_n % 120 == 0) {
                 std::fprintf(stderr,
-                    "[profile] pipeline %.1f fps | capture %.1f  infer %.1f  draw %.1f  show %.1f ms\n",
+                    "[profile] display %.1f fps | capture %.1f  infer %.1f (det %.0f fps)  draw %.1f  show %.1f ms\n",
                     ema_disp_ms > 0 ? 1000.0 / ema_disp_ms : 0.0,
-                    cap_ms.load(), ema_ms, ema_draw, ema_show);
+                    cap_ms.load(), ema_ms, last_det_fps, ema_draw, ema_show);
             }
 
             if (key == 'q' || key == 27) { running.store(false); break; }
@@ -427,7 +488,7 @@ int main(int argc, char** argv) {
 
         // ---- shutdown: wake every blocked stage, then join -----------------
         running.store(false);
-        cap_q.close();
+        infer_q.close();
         disp_q.close();
         capture.join();
         infer.join();

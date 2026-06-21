@@ -48,8 +48,14 @@ void RfDetrDetector::preprocess_into(const cv::Mat& frame, float* dst) const {
     for (int c = 0; c < 3; ++c) {  // c: 0=R, 1=G, 2=B
         cv::Mat plane(S, S, CV_32F, dst + static_cast<size_t>(c) * S * S);
         cv::extractChannel(rgb, chan, c);
-        chan.convertTo(plane, CV_32F, 1.0 / 255.0);
-        plane = (plane - kMean[c]) / kStd[c];
+        // Fold /255 + ImageNet (mean,std) into a single scale+shift pass:
+        //   (x/255 - mean)/std  ==  x * (1/(255*std))  +  (-mean/std)
+        // One convertTo instead of convert + subtract + divide — drops two
+        // element-wise passes and the MatExpr temporary per channel. Algebraically
+        // identical (verified bit-parity via rfdetr_smoke).
+        const double alpha = 1.0 / (255.0 * static_cast<double>(kStd[c]));
+        const double beta  = -static_cast<double>(kMean[c]) / static_cast<double>(kStd[c]);
+        chan.convertTo(plane, CV_32F, alpha, beta);
     }
 }
 
@@ -68,16 +74,19 @@ std::vector<std::vector<Detection>> RfDetrDetector::detect_batch(const std::vect
     // sizes pack into a uniform batch.
     const int S = cfg_.input_size;
     const int sizes[4] = {N, 3, S, S};
-    cv::Mat blob(4, sizes, CV_32F);
+    // Reuse the input buffer across calls: create() only reallocates when the
+    // shape changes (e.g. ROI batch=1 vs SAHI batch=8), so the high-frequency
+    // ROI path stops malloc/free-ing a multi-MB blob every frame.
+    blob_.create(4, sizes, CV_32F);
     cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& rng) {
         for (int n = rng.start; n < rng.end; ++n) {
-            preprocess_into(imgs[n], blob.ptr<float>() + static_cast<size_t>(n) * 3 * S * S);
+            preprocess_into(imgs[n], blob_.ptr<float>() + static_cast<size_t>(n) * 3 * S * S);
         }
     });
 
     std::vector<cv::Mat> outs;
     try {
-        outs = backend_->run_multi(blob);
+        outs = backend_->run_multi(blob_);
     } catch (const std::exception&) {
         if (N == 1) throw;                                   // genuine failure
         for (int n = 0; n < N; ++n) results[n] = detect(imgs[n]);  // fixed-batch / OOM fallback
