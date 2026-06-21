@@ -36,8 +36,10 @@ public:
             cv::Mat plane(in_h_, in_w_, CV_32F,
                           blob.ptr<float>() + static_cast<size_t>(c) * in_h_ * in_w_);
             cv::extractChannel(rgb, chan, c);
-            chan.convertTo(plane, CV_32F, 1.0 / 255.0);
-            plane = (plane - kMean[c]) / kStd[c];
+            // (x/255 - mean)/std folded into one scale+shift pass (see rfdetr_detector).
+            const double alpha = 1.0 / (255.0 * static_cast<double>(kStd[c]));
+            const double beta  = -static_cast<double>(kMean[c]) / static_cast<double>(kStd[c]);
+            chan.convertTo(plane, CV_32F, alpha, beta);
         }
 
         const cv::Mat out = backend_->run(blob);   // [1, D] feature
