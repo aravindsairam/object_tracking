@@ -1,0 +1,28 @@
+# WALDO30 + SAHI tiled inference for small/far objects.
+# Runs at a higher working resolution (1440p) so tiles contain usable detail.
+detector:
+  family:     waldo
+  model_path: models/WALDO30_yolov8n_640x640_bdyn.onnx
+  backend:    onnxruntime
+  device:     cuda
+  input_size: 640
+  conf:       0.25
+  nms_iou:    0.45
+  class_map:  waldo
+
+tiling:
+  enabled:    true
+  tile:       640
+  overlap:    0.2
+  full_frame: true     # also one whole-frame pass for large/near objects
+
+input:
+  height: 1440         # higher working res so far objects survive into the tiles
+
+lock:
+  coast_to_lost: 30        # frames the target can vanish before LOST
+  reacquire_thresh: 0.6    # appearance cosine to auto re-lock
+
+output:
+  sink: jsonl              # none | jsonl
+  path: out/track.jsonl

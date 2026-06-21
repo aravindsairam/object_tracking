@@ -1,0 +1,26 @@
+# RF-DETR small (512px) — transformer detector, NMS-free; faster than medium.
+# Runs on ONNX Runtime's TensorRT execution provider in FP16.
+# Export the ONNX first:
+#   python scripts/export_rfdetr_onnx.py small
+# First run builds + caches a TensorRT engine (slow once, then fast).
+detector:
+  family:     rfdetr
+  model_path: models/rfdetr_small_512.onnx
+  backend:    tensorrt        # tensorrt EP; use 'onnxruntime' for plain CUDA/CPU
+  precision:  fp16            # fp32 | fp16 | int8 (int8 also needs int8_calib)
+  device:     cuda
+  input_size: 512
+  conf:       0.5
+  class_map:  coco91          # RF-DETR raw ONNX uses 91-slot COCO ids (person=1)
+  # int8_calib: models/rfdetr_small_int8.cache    # required only when precision: int8
+
+tiling:
+  enabled: false
+
+lock:
+  coast_to_lost:    30
+  reacquire_thresh: 0.6
+
+output:
+  sink: jsonl
+  path: out/track.jsonl
