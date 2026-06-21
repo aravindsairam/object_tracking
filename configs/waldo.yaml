@@ -1,0 +1,26 @@
+# Default detector: WALDO30 (aerial-trained YOLOv8n) — best on drone footage.
+detector:
+  family:     waldo
+  model_path: models/WALDO30_yolov8n_640x640_dyn.onnx
+  backend:    onnxruntime
+  device:     cuda         # cuda | cpu
+  input_size: 640
+  conf:       0.25
+  nms_iou:    0.45
+  class_map:  waldo        # keeps LightVehicle, Person, Bike, Truck, Bus
+
+input:
+  height: 640              # working resolution (CLI --height overrides)
+
+lock:
+  coast_to_lost: 30        # frames the target can vanish before LOST
+  reacquire_thresh: 0.6    # appearance cosine to auto re-lock
+  verify_thresh: 0.35      # per-frame appearance gate on the matched id; below it
+                           # the track is treated as a miss (stops following an
+                           # id-switch onto a different object). 0 disables.
+  reacquire_max_frac: 0.2  # re-acquire search radius cap = this * min(W,H); stops
+                           # re-locking onto a far object after a loss. Lower=stricter.
+
+output:
+  sink: jsonl              # none | jsonl
+  path: out/track.jsonl

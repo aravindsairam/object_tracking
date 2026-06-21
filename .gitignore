@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────
+# Build output (CMake)
+# ─────────────────────────────────────────────────────────────
+build/
+out/
+cmake-build-*/
+
+# CMake-generated files (if ever generated outside build/)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# ─────────────────────────────────────────────────────────────
+# Compiled objects / libraries / binaries
+# ─────────────────────────────────────────────────────────────
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# ─────────────────────────────────────────────────────────────
+# Third-party vendored dependencies (large prebuilt libs / clones)
+#   - onnxruntime: ~1.4G of prebuilt .so + CUDA/cuDNN libs
+#   - motcpp:      ~168M nested git clone
+# Fetch/build these locally instead of committing them.
+# ─────────────────────────────────────────────────────────────
+third_party/
+
+# ─────────────────────────────────────────────────────────────
+# Model weights & inference caches (large binaries, not source)
+# ─────────────────────────────────────────────────────────────
+models/
+*.onnx
+*.pth
+*.pt
+*.engine
+*.plan
+*.profile
+*.timing
+*.trt
+trt_engine_cache/
+
+# ─────────────────────────────────────────────────────────────
+# Runtime outputs / logs
+# ─────────────────────────────────────────────────────────────
+*.jsonl
+*.log
+*.mp4
+*.avi
+*.mkv
+
+# ─────────────────────────────────────────────────────────────
+# Python (export scripts, venvs)
+# ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ─────────────────────────────────────────────────────────────
+# Claude Code (local agent config/state)
+# ─────────────────────────────────────────────────────────────
+.claude/
+
+# ─────────────────────────────────────────────────────────────
+# Docs (design notes, plans, specs — kept local)
+# ─────────────────────────────────────────────────────────────
+docs/
+
+# ─────────────────────────────────────────────────────────────
+# Editor / IDE / OS
+# ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

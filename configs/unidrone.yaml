@@ -1,0 +1,21 @@
+# UniDrone (aerial YOLOv8n) — people / vehicles / boats from drone POV.
+detector:
+  family:     unidrone
+  model_path: models/unidrone_yolov8n_640px_dyn.onnx
+  backend:    onnxruntime
+  device:     cuda         # cuda | cpu
+  input_size: 640
+  conf:       0.25
+  nms_iou:    0.45
+  class_map:  unidrone     # keeps person, bike, light_vehicle, truck, bus
+
+input:
+  height: 640
+
+lock:
+  coast_to_lost: 30        # frames the target can vanish before LOST
+  reacquire_thresh: 0.6    # appearance cosine to auto re-lock
+
+output:
+  sink: jsonl              # none | jsonl
+  path: out/track.jsonl

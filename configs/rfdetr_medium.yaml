@@ -1,0 +1,48 @@
+# RF-DETR medium (576px) — transformer detector, NMS-free.
+# Runs on ONNX Runtime's TensorRT execution provider in FP16.
+# Export the ONNX first:
+#   python scripts/export_rfdetr_onnx.py medium
+# First run builds + caches a TensorRT engine (slow once, then fast).
+detector:
+  family:     rfdetr
+  model_path: models/rfdetr_medium_576.onnx
+  backend:    tensorrt        # tensorrt EP; use 'onnxruntime' for plain CUDA/CPU
+  precision:  fp16            # fp32 | fp16 | int8 (int8 also needs int8_calib)
+  device:     cuda
+  input_size: 576
+  conf:       0.3             # lowered from 0.5: feeds ByteTrack's low-conf
+                             # association so a flickering target keeps its track id
+                             # instead of being dropped -> far fewer spurious LOSTs.
+  class_map:  coco91          # RF-DETR raw ONNX uses 91-slot COCO ids (person=1)
+  # int8_calib: models/rfdetr_medium_int8.cache   # required only when precision: int8
+
+tiling:
+  enabled: false
+
+lock:
+  coast_to_lost:    30
+  reacquire_thresh:  0.75  # appearance cosine to auto re-lock (raised from 0.6:
+                           # refuse weak re-acquires that grabbed near strangers).
+  reacquire_margin:  0.10  # best must beat the runner-up by this; refuses an
+                           # ambiguous match between two similar nearby objects.
+  verify_thresh:     0.35  # per-frame appearance gate on the matched id; below it
+                           # the track is a miss, so the lock won't silently follow
+                           # an id-switch onto a different object. 0 disables.
+  reacquire_max_frac: 0.2  # re-acquire search radius cap = this * min(W,H). Stops
+                           # re-locking onto a far object after a loss. Lower=stricter.
+
+# Appearance ReID for re-acquiring the locked target after occlusion.
+# Default is the model-free HSV histogram. For stronger re-ID across same-colored
+# targets, export an OSNet ONNX (python scripts/export_reid_onnx.py) and switch to:
+#   kind: onnx, model_path: models/reid_osnet_x1_0.onnx
+reid:
+  kind:       onnx                          # was: histogram
+  model_path: models/reid_osnet_x1_0.onnx
+  backend:    onnxruntime
+  device:     cuda
+  input_w:    128
+  input_h:    256
+
+output:
+  sink: jsonl
+  path: out/track.jsonl

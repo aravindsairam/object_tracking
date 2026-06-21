@@ -1,0 +1,70 @@
+# RF-DETR medium (576px) + SAHI tiled inference for small/distant objects.
+# Slices the frame into overlapping 576px tiles (fed ~1:1 to the model), shifts
+# boxes back, and merges with NMS. Export the ONNX first:
+#   python scripts/export_rfdetr_onnx.py medium
+#
+# PERF: cost scales with TILE COUNT, which is driven by input.height, overlap and
+# full_frame. RF-DETR is compute-bound per tile on a 3090 (~10-12 ms/tile), so
+# batching tiles does NOT speed it up — fewer tiles does. Measured on 4K DJI:
+#   h1440 ov0.2 +full  -> ~19 tiles, ~6 fps, max recall
+#   h1080 ov0.1 nofull -> ~9 tiles, ~17 fps  (this config; ~1-2 fewer tiny dets)
+# For max recall set: height 1440, overlap 0.2, full_frame true.
+# RF-DETR is already strong on small objects, so try plain configs/rfdetr_medium.yaml
+# first (~68 fps) — only reach for SAHI when you need the tiniest/most distant ones.
+detector:
+  family:     rfdetr
+  model_path: models/rfdetr_medium_576.onnx
+  backend:    tensorrt        # tensorrt EP; use 'onnxruntime' for plain CUDA/CPU
+  precision:  fp16
+  device:     cuda
+  input_size: 576
+  conf:       0.3             # lowered from 0.5: feeds ByteTrack's low-conf
+                             # association so a flickering target keeps its track id
+                             # instead of being dropped -> far fewer spurious LOSTs.
+  nms_iou:    0.5             # cross-tile merge NMS (TiledDetector)
+  class_map:  coco91          # RF-DETR raw ONNX uses 91-slot COCO ids (person=1)
+
+tiling:
+  enabled:    true
+  tile:       576             # match input_size -> tiles fed ~1:1 (max detail)
+  overlap:    0.1             # 0.2 = more robust seams, more tiles (slower)
+  full_frame: false          # true also runs a whole-frame pass (catches large objects)
+
+input:
+  height:     1080           # working res; raise to 1440 for more small-object detail
+  decoder:    auto           # auto (NVDEC + software fallback) | nvdec | software
+                             #   (OT_DECODER env var overrides this)
+
+lock:
+  coast_to_lost:    30
+  reacquire_thresh: 0.75     # raised from 0.6: refuse weak re-acquires. Field logs
+                            # showed wrong near-locks sneaking in at cos~0.60.
+  reacquire_margin: 0.10     # best must beat runner-up by this; refuses an ambiguous
+                            # match when two nearby objects look ~equally like target.
+  verify_thresh:    0.35     # per-frame appearance gate on the matched id; below it
+                            # the track is treated as a miss, so the lock stops
+                            # silently following an id-switch onto a different
+                            # object (ByteTrack reuses ids). 0 disables.
+  reacquire_max_frac: 0.2    # re-acquire search radius cap = this * min(W,H); stops
+                            # re-locking onto a far object after a loss. Lower=stricter.
+  # Locked-ROI fast-path: once locked, detect a crop around the target instead of
+  # full-frame SAHI every frame (much faster; full SAHI still runs every Nth frame
+  # to catch new objects / drift). Set roi_fastpath: false for full SAHI always.
+  roi_fastpath:      true
+  roi_full_interval: 20      # full SAHI every Nth frame while locked
+  roi_scale:         3.0     # ROI side = roi_scale * target's largest dimension
+
+# Appearance ReID for re-acquiring the locked target after occlusion.
+# Independent of detection/tiling — runs on the locked target's box. Set
+# kind: histogram for the model-free fallback.
+reid:
+  kind:       onnx                          # histogram (model-free) | onnx (neural OSNet)
+  model_path: models/reid_osnet_x1_0.onnx
+  backend:    onnxruntime
+  device:     cuda
+  input_w:    128
+  input_h:    256
+
+output:
+  sink: jsonl
+  path: out/track.jsonl

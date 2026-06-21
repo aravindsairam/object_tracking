@@ -1,0 +1,16 @@
+# YOLO26 COCO (general). NOTE: this ONNX has NMS baked in (end2end); OpenCV's
+# dnn importer may not support those ops — if it fails to load, use this model
+# via the ONNX Runtime / TensorRT backend at M6. WALDO/UniDrone are better for
+# aerial footage anyway.
+detector:
+  family:     yolo
+  model_path: models/yolo26n.onnx
+  backend:    onnxruntime
+  device:     cuda         # cuda | cpu
+  input_size: 640
+  conf:       0.25
+  nms_iou:    0.45
+  class_map:  coco         # keeps person, bicycle, car, motorcycle, bus, truck
+
+input:
+  height: 640
