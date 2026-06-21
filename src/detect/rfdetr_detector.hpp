@@ -33,6 +33,7 @@ private:
     std::vector<int>                   kept_ids_;     // people/vehicle native ids (hot-loop)
     float                              logit_thresh_; // inverse-sigmoid(conf): skip sigmoid below this
     std::unique_ptr<InferenceBackend>  backend_;
+    cv::Mat                            blob_;         // reused NCHW input buffer (no per-frame realloc)
 
     // Stretch-resize one frame to an input_size square and ImageNet-normalize it
     // directly into the CHW slot at `dst` (3*S*S floats). No letterbox — boxes
