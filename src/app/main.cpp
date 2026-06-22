@@ -4,6 +4,7 @@
 #include "ot/detector_factory.hpp"
 #include "ot/lock_manager.hpp"
 #include "ot/mot_tracker.hpp"
+#include "ot/one_euro.hpp"
 #include "ot/overlay.hpp"
 #include "ot/reid.hpp"
 #include "ot/selector.hpp"
@@ -38,6 +39,27 @@ double dur_ms(std::chrono::steady_clock::time_point a,
               std::chrono::steady_clock::time_point b) {
     return std::chrono::duration<double, std::milli>(b - a).count();
 }
+
+// One-Euro smoothing of the locked box for DISPLAY/OUTPUT only. Driven by a single
+// `smoothing` knob in [0,1]: 0 disables (caller skips apply), higher -> steadier but
+// laggier. Applied to a copy of the target so the raw box still feeds ROI prediction.
+struct BoxSmoother {
+    ot::OneEuroFilter fx, fy, fw, fh;
+    void reset() { fx.reset(); fy.reset(); fw.reset(); fh.reset(); }
+    void apply(ot::TargetState& t, double t_s, float smoothing) {
+        const float s = std::min(1.0f, std::max(0.0f, smoothing));
+        const float min_cutoff = 8.0f - 7.5f * s;   // s=0 -> 8 Hz (light); s=1 -> 0.5 Hz (steady)
+        const float beta = 0.02f;                    // speed adaptivity (less lag when moving fast)
+        float cx = t.box.x + t.box.w * 0.5f;
+        float cy = t.box.y + t.box.h * 0.5f;
+        cx = fx.filter(cx, t_s, min_cutoff, beta);
+        cy = fy.filter(cy, t_s, min_cutoff, beta);
+        const float w = fw.filter(t.box.w, t_s, min_cutoff, beta);
+        const float h = fh.filter(t.box.h, t_s, min_cutoff, beta);
+        t.box = {cx - w * 0.5f, cy - h * 0.5f, w, h};
+        t.center_px = {cx, cy};
+    }
+};
 
 // A decoded working-resolution frame. Used both for the capture->inference tap
 // (newest-wins, via push_latest) and the capture->display stream (every frame).
@@ -228,9 +250,15 @@ int main(int argc, char** argv) {
         else
             std::printf("[run] tracker: %s\n", cfg.tracker.type.c_str());
 
-        ot::LockManager lock(fps, cfg.lock.coast_to_lost, cfg.lock.reacquire_thresh, reid,
+        // coast_to_lost is referenced to 30 fps; scale to source fps so the lock
+        // tolerates the same ~wall-clock occlusion at 60 fps as it would at 30.
+        const double fps_scale = fps > 0 ? fps / 30.0 : 1.0;
+        const int coast = std::max(1, static_cast<int>(cfg.lock.coast_to_lost * fps_scale + 0.5));
+        ot::LockManager lock(fps, coast, cfg.lock.reacquire_thresh, reid,
                              cfg.lock.verify_thresh, cfg.lock.reacquire_max_frac,
                              cfg.lock.reacquire_margin);
+        if (cfg.lock.smoothing > 0.0f)
+            std::printf("[run] output smoothing: %.2f\n", cfg.lock.smoothing);
         // --out FILE forces a jsonl sink to that path (overrides config), so each
         // tracker config can dump to its own file for an objective A/B comparison.
         auto sink = out_override.empty()
@@ -308,6 +336,7 @@ int main(int argc, char** argv) {
             CapturedFrame in;
             ot::TargetState last_target;     // previous frame's lock state, drives the ROI crop
             int64_t infer_frame = 0;
+            BoxSmoother box_smoother;        // smooths the displayed/logged box (output only)
             const int full_every = std::max(1, cfg.lock.roi_full_interval);
             double det_ema = 0.0;
             auto t_prev = std::chrono::steady_clock::now();
@@ -355,8 +384,17 @@ int main(int argc, char** argv) {
                     lock.select(big->box.center(), in.img, tracks);
                 }
                 ot::TargetState target = lock.update(in.img, tracks);
-                last_target = target;
+                last_target = target;        // RAW copy: feeds ROI prediction, stays responsive
                 ++infer_frame;
+
+                // Output smoothing: steady the box we DISPLAY and LOG (not the raw
+                // last_target above, so ROI prediction keeps full responsiveness).
+                // Reset between locks so a fresh target doesn't inherit stale state.
+                if (cfg.lock.smoothing > 0.0f && target.valid())
+                    box_smoother.apply(target, fps > 0 ? in.index / fps : infer_frame / 30.0,
+                                       cfg.lock.smoothing);
+                else
+                    box_smoother.reset();
 
                 const bool locked = lock.has_target() || lock.state() == ot::LockState::Lost;
                 if (locked) {

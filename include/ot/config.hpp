@@ -45,6 +45,10 @@ struct TrackerCfg {
                                  // (scaled by frame_rate/30 internally).
     float min_conf     = 0.1f;   // low-confidence floor: dets between this and track_thresh feed
                                  // the second association pass (BoT-SORT: track_low_thresh).
+    float iou_threshold = 0.3f;  // IoU gate for association (all trackers). Small fast aerial
+                                 // boxes can move >1 box-width/frame at high fps, dropping IoU
+                                 // to ~0 even for the right match — lower this (e.g. 0.2) if
+                                 // small targets fragment; raise it to reject clutter matches.
 
     // BoT-SORT only. Ignored when type: bytetrack.
     float new_track_thresh  = 0.6f;   // min confidence to spawn a brand-new id.
@@ -62,17 +66,36 @@ struct TrackerCfg {
     // that handles erratic/non-linear motion better than ByteTrack's linear Kalman —
     // the cheaper, more aerial-appropriate upgrade. Uses track_thresh (high-conf cut)
     // and min_conf (low floor) from the shared knobs above.
-    int   delta_t  = 3;       // observation window (frames) for the velocity-direction estimate.
+    // max_age and delta_t are frame counts referenced to 30 fps and AUTO-SCALED to
+    // the source fps (OC-SORT, unlike ByteTrack/BoT-SORT, has no frame_rate input, so
+    // a raw 30 = only 0.5 s of occlusion tolerance at 60 fps — scaling restores the
+    // intended time window). So the values below mean "@30 fps"; at 60 fps they double.
+    int   max_age  = 30;      // lost-track lifetime before deletion (@30 fps => 1 s). Raise to
+                              // hold a track longer through occlusion (fewer LOSTs, more drift risk).
+    int   delta_t  = 3;       // observation window for the velocity-direction estimate (@30 fps =>
+                              // 100 ms). Too short at high fps = jitter-dominated, noisy direction.
     float inertia  = 0.2f;    // weight of velocity-direction consistency in the cost (OCM term);
                               // higher trusts smooth motion more, lower lets IoU dominate.
     bool  use_byte = true;    // also run a ByteTrack-style low-conf second association pass — keeps
                               // flickering small targets (recommended for aerial small objects).
+    float q_xy_scaling = 0.01f;    // OC-SORT Kalman position process-noise scale. LOWER = smoother,
+                                   // laggier box (damps jitter at the source); higher = snappier.
+    float q_s_scaling  = 0.0001f;  // OC-SORT Kalman scale/size process-noise scale (box-size jitter).
 };
 
 // Single-target lock behavior.
 struct LockCfg {
-    int   coast_to_lost = 30;          // missing frames tolerated before declaring LOST
+    int   coast_to_lost = 30;          // missing frames tolerated before declaring LOST. Referenced
+                                       // to 30 fps and AUTO-SCALED to source fps (=> ~1 s), so the
+                                       // lock doesn't give up after 0.5 s on 60 fps footage.
     float reacquire_thresh = 0.6f;     // appearance cosine needed to auto re-lock
+
+    // One-Euro smoothing applied to the DISPLAYED/LOGGED target box only (not the
+    // tracker's internal state, and not the ROI-prediction box — those stay raw and
+    // responsive). 0 = off (raw, current behavior). Raise toward ~1 for a steadier
+    // box at the cost of a little lag — useful for aiming. Tunable; re-measure jitter
+    // with scripts/eval_tracks.py. Internally maps to One-Euro min_cutoff/beta.
+    float smoothing = 0.0f;
 
     // Per-frame appearance gate on the id-matched track: ByteTrack reuses a track
     // id across different objects, so a surviving id is not proof of identity. A
