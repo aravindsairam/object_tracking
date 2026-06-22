@@ -1,0 +1,72 @@
+# RF-DETR medium (576px) + SAHI tiling, tracked with OC-SORT.
+#
+# configs/rfdetr_medium_sahi.yaml with the `tracker:` block switched to OC-SORT.
+# OC-SORT is MOTION-ONLY: no ReID, no GMC, no per-detection embedding cost — so it
+# is as cheap as ByteTrack, but its observation-centric motion model (velocity-
+# direction consistency + re-update from real observations) handles erratic, non-
+# linear, small-object motion far better than ByteTrack's linear Kalman. On aerial
+# benchmarks this is the more reliable accuracy-per-cost upgrade than BoT-SORT,
+# whose person-ReID appearance tends to hurt on tiny top-down targets.
+#
+# Compare against the others on the same clip (add --profile to read stage timing):
+#   ./build/object_tracking $VID configs/rfdetr_medium_sahi.yaml         --zoom   # ByteTrack
+#   ./build/object_tracking $VID configs/rfdetr_medium_sahi_ocsort.yaml  --zoom   # OC-SORT
+#   ./build/object_tracking $VID configs/rfdetr_medium_sahi_botsort.yaml --zoom   # BoT-SORT (ReID+GMC)
+detector:
+  family:     rfdetr
+  model_path: models/rfdetr_medium_576.onnx
+  backend:    tensorrt        # tensorrt EP; use 'onnxruntime' for plain CUDA/CPU
+  precision:  fp16
+  device:     cuda
+  input_size: 576
+  conf:       0.3             # lowered from 0.5: feeds the low-conf association so a
+                             # flickering target keeps its track id -> far fewer LOSTs.
+  nms_iou:    0.5             # cross-tile merge NMS (TiledDetector)
+  class_map:  coco91          # RF-DETR raw ONNX uses 91-slot COCO ids (person=1)
+
+tiling:
+  enabled:    true
+  tile:       576             # match input_size -> tiles fed ~1:1 (max detail)
+  overlap:    0.1             # 0.2 = more robust seams, more tiles (slower)
+  full_frame: false          # true also runs a whole-frame pass (catches large objects)
+
+# Multi-object tracker. type: ocsort = motion-only, observation-centric (cheap, good
+# for non-linear small-object motion).
+tracker:
+  type:         ocsort       # bytetrack | botsort | ocsort
+  # Shared knobs (kept equal to the ByteTrack defaults for a fair comparison).
+  track_thresh: 0.4          # high-confidence detection cut (OC-SORT: det_thresh)
+  min_conf:     0.1          # low-confidence floor for the second association pass
+  # OC-SORT only.
+  delta_t:      3            # frames of observation history used for the velocity estimate
+  inertia:      0.2          # weight of velocity-direction consistency in the cost (OCM)
+  use_byte:     true         # ByteTrack-style low-conf second pass — keeps flickering small targets
+
+input:
+  height:     1080           # working res; raise to 1440 for more small-object detail
+  decoder:    auto           # auto (NVDEC + software fallback) | nvdec | software
+
+lock:
+  coast_to_lost:    30
+  reacquire_thresh: 0.75     # refuse weak re-acquires (field logs showed wrong near-locks at cos~0.60)
+  reacquire_margin: 0.10     # best must beat runner-up by this; refuses an ambiguous re-acquire
+  verify_thresh:    0.35     # per-frame appearance gate on the matched id; below it the track is
+                            # treated as a miss, so the lock stops following an id-switch. 0 disables.
+  reacquire_max_frac: 0.2    # re-acquire search radius cap = this * min(W,H); stops far re-locks
+  roi_fastpath:      true
+  roi_full_interval: 20      # full SAHI every Nth frame while locked
+  roi_scale:         3.0     # ROI side = roi_scale * target's largest dimension
+
+# Appearance ReID for the LOCK only (verify + re-acquire). OC-SORT does not use it
+# for association, so it runs just on the locked target's box — same cost as ByteTrack.
+reid:
+  kind:       onnx                          # histogram (model-free) | onnx (neural OSNet)
+  model_path: models/reid_osnet_x1_0.onnx
+  backend:    onnxruntime
+  device:     cuda
+  input_w:    128
+  input_h:    256
+
+output:
+  sink: jsonl
+  path: out/track.jsonl
