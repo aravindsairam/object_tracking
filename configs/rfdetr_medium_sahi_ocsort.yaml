@@ -33,21 +33,34 @@ tiling:
 # Multi-object tracker. type: ocsort = motion-only, observation-centric (cheap, good
 # for non-linear small-object motion).
 tracker:
-  type:         ocsort       # bytetrack | botsort | ocsort
-  # Shared knobs (kept equal to the ByteTrack defaults for a fair comparison).
-  track_thresh: 0.4          # high-confidence detection cut (OC-SORT: det_thresh)
-  min_conf:     0.1          # low-confidence floor for the second association pass
-  # OC-SORT only.
-  delta_t:      3            # frames of observation history used for the velocity estimate
-  inertia:      0.2          # weight of velocity-direction consistency in the cost (OCM)
-  use_byte:     true         # ByteTrack-style low-conf second pass — keeps flickering small targets
+  type:          ocsort      # bytetrack | botsort | ocsort
+  # Shared knobs.
+  track_thresh:  0.4         # high-confidence detection cut (OC-SORT: det_thresh)
+  min_conf:      0.1         # low-confidence floor for the second association pass
+  iou_threshold: 0.3         # association IoU gate. Small fast aerial boxes can lose IoU at high
+                            # fps — try 0.2 if tiny targets fragment; 0.3 is the safe default.
+  # OC-SORT only. max_age and delta_t are @30 fps and AUTO-SCALED to source fps
+  # (at 59.94 fps they roughly double), since OC-SORT has no frame_rate input.
+  max_age:       30          # lost-track lifetime (@30 fps => ~1 s). Raise to 45-60 to hold a
+                            # target longer through occlusion (fewer LOSTs; more drift risk).
+  delta_t:       3           # velocity-estimate window (@30 fps => ~100 ms). Auto-scaled, so no
+                            # need to bump for 60 fps — it already restores the 100 ms baseline.
+  inertia:       0.2         # velocity-direction consistency weight (OCM). Try 0.3-0.4 if targets
+                            # move smoothly (helps hold through clutter); lower lets IoU dominate.
+  use_byte:      true        # ByteTrack-style low-conf second pass — keeps flickering small targets
+  # Kalman process-noise (jitter at the source). Lower = smoother but laggier box.
+  q_xy_scaling:  0.01        # position noise; halve to ~0.005 to damp box jitter (adds a little lag)
+  q_s_scaling:   0.0001      # box-size noise
 
 input:
   height:     1080           # working res; raise to 1440 for more small-object detail
   decoder:    auto           # auto (NVDEC + software fallback) | nvdec | software
 
 lock:
-  coast_to_lost:    30
+  coast_to_lost:    30       # missing frames before LOST, @30 fps => ~1 s (AUTO-SCALED to source fps)
+  smoothing:        0.4      # One-Euro smoothing of the DISPLAYED/LOGGED box (0=off). 0.4 measured
+                            # ~40% lower box jitter (below ByteTrack) at slight lag; raise toward 1
+                            # for steadier/laggier. Does NOT affect the tracker or ROI prediction.
   reacquire_thresh: 0.75     # refuse weak re-acquires (field logs showed wrong near-locks at cos~0.60)
   reacquire_margin: 0.10     # best must beat runner-up by this; refuses an ambiguous re-acquire
   verify_thresh:    0.35     # per-frame appearance gate on the matched id; below it the track is

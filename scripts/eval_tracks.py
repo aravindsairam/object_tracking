@@ -135,12 +135,19 @@ def analyze(recs):
         "duration_min": duration_min,
         "id_switch_rate": 1000.0 * id_switches / held if held else 0.0,
         "id_switches": id_switches,
+        "coasting_events": coasting_episodes,
+        "lost_events": lost_episodes,
         "coasting_per_min": coasting_episodes / duration_min if duration_min else 0.0,
         "lost_per_min": lost_episodes / duration_min if duration_min else 0.0,
         "lock_continuity": locked / n if n else 0.0,
         "jitter_px": jitter,
         "coverage": n / span if span else 0.0,
     }
+
+
+# Rate metrics derived from fewer than this many raw events are Poisson-noise
+# dominated on a short clip — flagged in the output so they aren't over-read.
+MIN_TRUSTWORTHY_EVENTS = 10
 
 
 def fmt(v):
@@ -173,12 +180,16 @@ def main():
     header = "metric".ljust(label_w) + "".join(name.rjust(col_w) for name, _ in cols)
     print(header)
     print("-" * len(header))
-    # context rows
-    for key, label in [("n", "frames logged"), ("duration_min", "duration (min)")]:
+    # context rows (raw counts — so rate metrics below can be sanity-checked)
+    for key, label in [("n", "frames logged"), ("duration_min", "duration (min)"),
+                       ("coasting_events", "coasting events"), ("lost_events", "lost events")]:
         row = label.ljust(label_w) + "".join(fmt(a[key]).rjust(col_w) for _, a in cols)
         print(row)
     print("-" * len(header))
 
+    # rate metrics backed by a raw event count — flag when that count is too low to trust
+    event_key = {"coasting_per_min": "coasting_events", "lost_per_min": "lost_events"}
+    noisy_rows = False
     for key, label, better in METRICS:
         vals = [a[key] for _, a in cols]
         best = (min if better < 0 else max)(vals)
@@ -189,12 +200,19 @@ def main():
                 s = s + "*"          # mark the best column
             cells += s.rjust(col_w)
         arrow = "↓" if better < 0 else "↑"
-        print(f"{label} {arrow}".ljust(label_w) + cells)
+        flag = ""
+        if key in event_key and max(a[event_key[key]] for _, a in cols) < MIN_TRUSTWORTHY_EVENTS:
+            flag = "   ~noisy (<%d events)" % MIN_TRUSTWORTHY_EVENTS
+            noisy_rows = True
+        print(f"{label} {arrow}".ljust(label_w) + cells + flag)
 
     print("-" * len(header))
     print("* = best in row.  ↓ lower is better, ↑ higher is better.")
     print("id switches = raw MOT track_id flips under a held lock_id (the core tracker-quality signal).")
     print("coverage<1 or low fps in one column = that tracker is dropping frames (too slow for real time).")
+    if noisy_rows:
+        print("~noisy = rate from a single-digit event count: dominated by run-to-run variance on a")
+        print("        short clip. Use a longer clip (5-10 min) and --autolock before trusting it.")
     return 0
 
 

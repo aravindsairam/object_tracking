@@ -8,6 +8,8 @@
 #include <motcpp/trackers/botsort.hpp>
 #include <motcpp/trackers/ocsort.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <utility>
@@ -27,7 +29,7 @@ struct MotTracker::Impl {
                 /*max_age      */ 30,
                 /*max_obs      */ 50,
                 /*min_hits     */ 2,
-                /*iou_threshold*/ 0.3f,
+                /*iou_threshold*/ cfg.iou_threshold,
                 /*per_class    */ false,   // keep id across class flips (car<->truck)
                 /*nr_classes   */ 80,
                 /*asso_func    */ "iou",
@@ -46,7 +48,7 @@ struct MotTracker::Impl {
                 /*max_age           */ 30,
                 /*max_obs           */ 50,
                 /*min_hits          */ 2,
-                /*iou_threshold     */ 0.3f,
+                /*iou_threshold     */ cfg.iou_threshold,
                 /*per_class         */ false,
                 /*nr_classes        */ 80,
                 /*asso_func         */ "iou",
@@ -65,20 +67,29 @@ struct MotTracker::Impl {
             feed_embeddings = cfg.with_reid && reid != nullptr;
         } else if (cfg.type == "ocsort") {
             // Motion-only: no embeddings, no GMC, no per-detection ReID cost.
+            // OC-SORT takes no frame_rate, so its frame-count params (max_age, delta_t)
+            // are referenced to 30 fps and scaled here to the source fps — otherwise at
+            // 60 fps a raw max_age=30 tolerates only 0.5 s of occlusion (half of what
+            // ByteTrack, which scales its buffer internally, gets).
+            const float fps_scale = frame_rate > 0 ? frame_rate / 30.0f : 1.0f;
+            const int max_age = std::max(1, static_cast<int>(std::lround(cfg.max_age * fps_scale)));
+            const int delta_t = std::max(1, static_cast<int>(std::lround(cfg.delta_t * fps_scale)));
             tracker = std::make_unique<motcpp::trackers::OCSort>(
                 /*det_thresh   */ cfg.track_thresh,   // high-confidence cut
-                /*max_age      */ 30,
+                /*max_age      */ max_age,
                 /*max_obs      */ 50,
                 /*min_hits     */ 2,
-                /*iou_threshold*/ 0.3f,
+                /*iou_threshold*/ cfg.iou_threshold,
                 /*per_class    */ false,
                 /*nr_classes   */ 80,
                 /*asso_func    */ "iou",
                 /*is_obb       */ false,
                 /*min_conf     */ cfg.min_conf,
-                /*delta_t      */ cfg.delta_t,
+                /*delta_t      */ delta_t,
                 /*inertia      */ cfg.inertia,
-                /*use_byte     */ cfg.use_byte);
+                /*use_byte     */ cfg.use_byte,
+                /*Q_xy_scaling */ cfg.q_xy_scaling,
+                /*Q_s_scaling  */ cfg.q_s_scaling);
         } else {
             throw std::runtime_error("MotTracker: unknown tracker.type '" + cfg.type +
                                      "' (expected 'bytetrack', 'botsort' or 'ocsort')");
