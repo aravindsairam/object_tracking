@@ -28,6 +28,47 @@ struct TilingCfg {
     bool  full_frame = true;   // also run one whole-frame pass (catches large objects)
 };
 
+// Multi-object tracker selection and association tuning. The detector feeds the
+// same boxes to whichever tracker is chosen here, so switching is purely a config
+// change (no recompile). ByteTrack is IoU + motion only (fast, the default).
+// BoT-SORT adds camera-motion compensation (GMC) and appearance (ReID) fusion to
+// the association — costlier per frame, but far steadier under camera motion and
+// when similar-looking targets cross, which is the aerial failure mode.
+struct TrackerCfg {
+    std::string type = "bytetrack";   // bytetrack | botsort | ocsort
+
+    // Shared association knobs (same meaning for both trackers).
+    float track_thresh = 0.4f;   // high-confidence cut: above it a det can start/extend a
+                                 // track in the first association pass (BoT-SORT: track_high_thresh).
+    float match_thresh = 0.8f;   // max association cost (1-IoU, or fused) to accept a match.
+    int   track_buffer = 30;     // frames a lost track is retained before deletion
+                                 // (scaled by frame_rate/30 internally).
+    float min_conf     = 0.1f;   // low-confidence floor: dets between this and track_thresh feed
+                                 // the second association pass (BoT-SORT: track_low_thresh).
+
+    // BoT-SORT only. Ignored when type: bytetrack.
+    float new_track_thresh  = 0.6f;   // min confidence to spawn a brand-new id.
+    float proximity_thresh  = 0.5f;   // IoU gate: appearance is only trusted for box pairs that
+                                      // already overlap enough (rejects far look-alikes).
+    float appearance_thresh = 0.25f;  // max embedding distance for appearance to fuse into the cost.
+    std::string cmc_method  = "ecc";  // camera-motion compensation: "ecc" (OpenCV ECC) enables GMC;
+                                      // any other value (e.g. "none") disables it.
+    bool  with_reid         = true;   // fuse ReID appearance into association. Reuses the same
+                                      // embedder as the lock (see ReidCfg); costs one embed per
+                                      // detection per frame. Set false for motion + GMC only.
+
+    // OC-SORT only. Ignored unless type: ocsort. Motion-only tracker (no ReID, no
+    // GMC, no per-detection embedding cost) with an observation-centric motion model
+    // that handles erratic/non-linear motion better than ByteTrack's linear Kalman —
+    // the cheaper, more aerial-appropriate upgrade. Uses track_thresh (high-conf cut)
+    // and min_conf (low floor) from the shared knobs above.
+    int   delta_t  = 3;       // observation window (frames) for the velocity-direction estimate.
+    float inertia  = 0.2f;    // weight of velocity-direction consistency in the cost (OCM term);
+                              // higher trusts smooth motion more, lower lets IoU dominate.
+    bool  use_byte = true;    // also run a ByteTrack-style low-conf second association pass — keeps
+                              // flickering small targets (recommended for aerial small objects).
+};
+
 // Single-target lock behavior.
 struct LockCfg {
     int   coast_to_lost = 30;          // missing frames tolerated before declaring LOST
@@ -83,6 +124,7 @@ struct OutputCfg {
 struct Config {
     DetectorCfg detector;
     TilingCfg   tiling;
+    TrackerCfg  tracker;
     LockCfg     lock;
     ReidCfg     reid;
     OutputCfg   output;

@@ -156,6 +156,8 @@ int main(int argc, char** argv) {
             "  --loop         restart at end of stream\n"
             "  --profile      print pipeline timing to stderr every 120 frames\n"
             "  --autolock     auto-lock the most central track (centered tracking / headless)\n"
+            "  --out FILE     write per-frame locked-target JSONL to FILE (forces jsonl sink;\n"
+            "                 for A/B eval: same clip + --autolock, one FILE per tracker config)\n"
             "  --display-fps N  cap display to N fps (default: source fps, max 60; 0=uncapped)\n"
             "  --zoom         show a magnified side panel of the locked target\n"
             "  --zoom-width N width of the zoom side panel in px (default: 360)\n"
@@ -171,6 +173,7 @@ int main(int argc, char** argv) {
     bool loop = false;
     bool profile = false;
     bool autolock = false;
+    std::string out_override;      // --out FILE: force jsonl sink to this path (A/B eval)
     double display_fps = -1.0;     // -1 = match source fps (capped at 60); 0 = uncapped (benchmark)
     bool zoom = false;             // show a magnified side panel of the locked target
     int  zoom_w = 360;             // zoom side-panel width in px
@@ -182,6 +185,7 @@ int main(int argc, char** argv) {
         else if (a == "--loop")                   loop = true;
         else if (a == "--profile")                profile = true;
         else if (a == "--autolock")               autolock = true;
+        else if (a == "--out" && i + 1 < argc)    out_override = argv[++i];
         else if (a == "--display-fps" && i + 1 < argc) display_fps = std::stod(argv[++i]);
         else if (a == "--zoom")                   zoom = true;
         else if (a == "--zoom-width" && i + 1 < argc) zoom_w = std::max(120, std::stoi(argv[++i]));
@@ -207,17 +211,33 @@ int main(int argc, char** argv) {
 
         auto detector = ot::make_detector(cfg.detector, cfg.tiling);
         const ot::ClassMap class_map = ot::ClassMap::preset(cfg.detector.class_map);
-        ot::MotTracker tracker(static_cast<int>(fps));
-
+        // One appearance embedder, shared by the tracker (BoT-SORT association) and
+        // the lock (verify + re-acquire). Created before the tracker so it can be
+        // handed in; with ByteTrack only the lock uses it.
         auto reid = cfg.reid.kind == "onnx"
             ? ot::make_onnx_reid_embedder(cfg.reid.model_path, cfg.reid.input_w, cfg.reid.input_h,
                                           cfg.reid.backend, cfg.reid.device, cfg.reid.precision)
             : ot::make_histogram_embedder();
         std::printf("[run] reid: %s\n", cfg.reid.kind.c_str());
+
+        ot::MotTracker tracker(cfg.tracker, static_cast<int>(fps), reid);
+        if (cfg.tracker.type == "botsort")
+            std::printf("[run] tracker: botsort (reid=%s, gmc=%s)\n",
+                        (cfg.tracker.with_reid && reid) ? "on" : "off",
+                        cfg.tracker.cmc_method == "ecc" ? "ecc" : "off");
+        else
+            std::printf("[run] tracker: %s\n", cfg.tracker.type.c_str());
+
         ot::LockManager lock(fps, cfg.lock.coast_to_lost, cfg.lock.reacquire_thresh, reid,
                              cfg.lock.verify_thresh, cfg.lock.reacquire_max_frac,
                              cfg.lock.reacquire_margin);
-        auto sink = ot::make_sink(cfg.output.sink, cfg.output.path);
+        // --out FILE forces a jsonl sink to that path (overrides config), so each
+        // tracker config can dump to its own file for an objective A/B comparison.
+        auto sink = out_override.empty()
+            ? ot::make_sink(cfg.output.sink, cfg.output.path)
+            : ot::make_sink("jsonl", out_override);
+        if (!out_override.empty())
+            std::printf("[run] locked-target log -> %s\n", out_override.c_str());
 
         std::unique_ptr<cv::VideoWriter> recorder;
         if (!record_path.empty()) {
