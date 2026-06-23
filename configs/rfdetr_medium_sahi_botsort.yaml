@@ -1,0 +1,81 @@
+# RF-DETR medium (576px) + SAHI tiling, tracked with BoT-SORT (ReID + GMC).
+#
+# This is configs/rfdetr_medium_sahi.yaml with ONE change: the `tracker:` block
+# below selects BoT-SORT instead of the default ByteTrack, so you can A/B the two
+# on identical detections/tiling/input. Run both on the same clip:
+#   ./build/object_tracking $VID configs/rfdetr_medium_sahi.yaml         --zoom   # ByteTrack
+#   ./build/object_tracking $VID configs/rfdetr_medium_sahi_botsort.yaml --zoom   # BoT-SORT
+#
+# What BoT-SORT adds over ByteTrack:
+#   * GMC (camera-motion compensation): re-projects predicted boxes through an
+#     estimated camera-pan warp before association -> fewer ID switches when the
+#     drone pans/translates. motcpp's ECC runs on a 0.15x-downscaled grayscale
+#     frame in translation-only mode, so it is cheap (a few ms), but it does NOT
+#     compensate zoom/rotation. Set cmc_method: none to disable and isolate ReID.
+#   * ReID fusion: fuses the SAME OSNet appearance embedding the lock already uses
+#     into the association cost -> disambiguates similar/crossing targets. Costs
+#     one embed per detection per frame (cheap while the locked-ROI fast-path keeps
+#     detection counts low; the full-SAHI frames every roi_full_interval are the
+#     spendy ones). Set with_reid: false for motion + GMC only.
+detector:
+  family:     rfdetr
+  model_path: models/rfdetr_medium_576.onnx
+  backend:    tensorrt        # tensorrt EP; use 'onnxruntime' for plain CUDA/CPU
+  precision:  fp16
+  device:     cuda
+  input_size: 576
+  conf:       0.3             # lowered from 0.5: feeds the low-conf association so a
+                             # flickering target keeps its track id -> far fewer LOSTs.
+  nms_iou:    0.5             # cross-tile merge NMS (TiledDetector)
+  class_map:  coco91          # RF-DETR raw ONNX uses 91-slot COCO ids (person=1)
+
+tiling:
+  enabled:    true
+  tile:       576             # match input_size -> tiles fed ~1:1 (max detail)
+  overlap:    0.1             # 0.2 = more robust seams, more tiles (slower)
+  full_frame: false          # true also runs a whole-frame pass (catches large objects)
+
+# Multi-object tracker. type: botsort enables camera-motion compensation + ReID
+# appearance fusion in the association (vs. ByteTrack's IoU-only matching).
+tracker:
+  type:              botsort   # bytetrack | botsort
+  # Shared knobs (kept equal to the ByteTrack defaults for a fair comparison).
+  track_thresh:      0.4       # high-confidence detection cut (BoT-SORT: track_high_thresh)
+  match_thresh:      0.8       # max association cost to accept a match
+  track_buffer:      30        # frames a lost track is retained before deletion
+  min_conf:          0.1       # low-confidence floor for the second association pass
+  # BoT-SORT only.
+  new_track_thresh:  0.6       # min confidence to spawn a brand-new id
+  proximity_thresh:  0.5       # IoU gate before appearance is trusted (rejects far look-alikes)
+  appearance_thresh: 0.25      # max embedding distance for appearance to fuse into the cost
+  cmc_method:        ecc       # ecc = enable GMC (camera-pan compensation); none = disable
+  with_reid:         true      # fuse the OSNet ReID embedding (below) into association
+
+input:
+  height:     1080           # working res; raise to 1440 for more small-object detail
+  decoder:    auto           # auto (NVDEC + software fallback) | nvdec | software
+
+lock:
+  coast_to_lost:    30
+  reacquire_thresh: 0.75     # refuse weak re-acquires (field logs showed wrong near-locks at cos~0.60)
+  reacquire_margin: 0.10     # best must beat runner-up by this; refuses an ambiguous re-acquire
+  verify_thresh:    0.35     # per-frame appearance gate on the matched id; below it the track is
+                            # treated as a miss, so the lock stops following an id-switch. 0 disables.
+  reacquire_max_frac: 0.2    # re-acquire search radius cap = this * min(W,H); stops far re-locks
+  roi_fastpath:      true
+  roi_full_interval: 20      # full SAHI every Nth frame while locked
+  roi_scale:         3.0     # ROI side = roi_scale * target's largest dimension
+
+# Appearance ReID. With BoT-SORT (with_reid: true) this SAME model also feeds the
+# association cost, not just the lock — so it runs on every detection each frame.
+reid:
+  kind:       onnx                          # histogram (model-free) | onnx (neural OSNet)
+  model_path: models/reid_osnet_x1_0.onnx
+  backend:    onnxruntime
+  device:     cuda
+  input_w:    128
+  input_h:    256
+
+output:
+  sink: jsonl
+  path: out/track.jsonl

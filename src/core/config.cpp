@@ -43,9 +43,34 @@ Config load_config(const std::string& yaml_path) {
     cfg.tiling.overlap    = get_or<float>(t, "overlap", cfg.tiling.overlap);
     cfg.tiling.full_frame = get_or<bool>(t, "full_frame", cfg.tiling.full_frame);
 
+    const YAML::Node tr = root["tracker"];
+    cfg.tracker.type             = get_or<std::string>(tr, "type", cfg.tracker.type);
+    cfg.tracker.track_thresh     = get_or<float>(tr, "track_thresh", cfg.tracker.track_thresh);
+    cfg.tracker.match_thresh     = get_or<float>(tr, "match_thresh", cfg.tracker.match_thresh);
+    cfg.tracker.track_buffer     = get_or<int>(tr, "track_buffer", cfg.tracker.track_buffer);
+    cfg.tracker.min_conf         = get_or<float>(tr, "min_conf", cfg.tracker.min_conf);
+    cfg.tracker.iou_threshold    = get_or<float>(tr, "iou_threshold", cfg.tracker.iou_threshold);
+    cfg.tracker.new_track_thresh = get_or<float>(tr, "new_track_thresh", cfg.tracker.new_track_thresh);
+    cfg.tracker.proximity_thresh = get_or<float>(tr, "proximity_thresh", cfg.tracker.proximity_thresh);
+    cfg.tracker.appearance_thresh = get_or<float>(tr, "appearance_thresh", cfg.tracker.appearance_thresh);
+    cfg.tracker.cmc_method       = get_or<std::string>(tr, "cmc_method", cfg.tracker.cmc_method);
+    cfg.tracker.with_reid        = get_or<bool>(tr, "with_reid", cfg.tracker.with_reid);
+    cfg.tracker.max_age          = get_or<int>(tr, "max_age", cfg.tracker.max_age);
+    cfg.tracker.delta_t          = get_or<int>(tr, "delta_t", cfg.tracker.delta_t);
+    cfg.tracker.inertia          = get_or<float>(tr, "inertia", cfg.tracker.inertia);
+    cfg.tracker.use_byte         = get_or<bool>(tr, "use_byte", cfg.tracker.use_byte);
+    cfg.tracker.q_xy_scaling     = get_or<float>(tr, "q_xy_scaling", cfg.tracker.q_xy_scaling);
+    cfg.tracker.q_s_scaling      = get_or<float>(tr, "q_s_scaling", cfg.tracker.q_s_scaling);
+    if (cfg.tracker.type != "bytetrack" && cfg.tracker.type != "botsort" &&
+        cfg.tracker.type != "ocsort") {
+        throw std::runtime_error("load_config: tracker.type must be 'bytetrack', 'botsort' or "
+                                 "'ocsort', got '" + cfg.tracker.type + "'");
+    }
+
     const YAML::Node l = root["lock"];
     cfg.lock.coast_to_lost    = get_or<int>(l, "coast_to_lost", cfg.lock.coast_to_lost);
     cfg.lock.reacquire_thresh = get_or<float>(l, "reacquire_thresh", cfg.lock.reacquire_thresh);
+    cfg.lock.smoothing        = get_or<float>(l, "smoothing", cfg.lock.smoothing);
     cfg.lock.verify_thresh    = get_or<float>(l, "verify_thresh", cfg.lock.verify_thresh);
     cfg.lock.reacquire_max_frac = get_or<float>(l, "reacquire_max_frac", cfg.lock.reacquire_max_frac);
     cfg.lock.reacquire_margin = get_or<float>(l, "reacquire_margin", cfg.lock.reacquire_margin);
