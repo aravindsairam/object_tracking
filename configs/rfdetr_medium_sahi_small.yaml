@@ -1,0 +1,79 @@
+# RF-DETR medium (576px) + SAHI tuned for the TINIEST / most distant objects.
+# Sibling of rfdetr_medium_sahi.yaml, which is tuned for speed. This one trades
+# fps for small-object recall. Export the ONNX first:
+#   python scripts/export_rfdetr_onnx.py medium
+#
+# The four small-object levers vs. the fast config:
+#   tile 576 -> 384   : tiles are UPSCALED 576/384 = 1.5x into the model, so a
+#                       ~24px object hits the network as ~36px. This (not tile
+#                       count) is the single biggest knob for tiny objects.
+#   overlap 0.1 -> 0.2: small objects bisected by a tile seam survive in the
+#                       neighbouring tile. The greedy IOS merge dedups the seam
+#                       fragments, so higher overlap doesn't spawn duplicates.
+#   height 1080 ->1440: more source pixels per object BEFORE slicing.
+#   conf 0.3 -> 0.2   : faint distant objects emit weak logits; lower gate lets
+#                       them through. ByteTrack low-conf association + the lock
+#                       appearance gate absorb most of the extra false positives.
+#
+# PERF: cost scales with TILE COUNT (driven by tile size, input.height, overlap),
+# and RF-DETR is compute-bound per tile (~10-12 ms/tile on a 3090; batching does
+# NOT help). This config produces roughly 3x the tiles of the fast one -> expect
+# single-digit fps on 4K DJI. The locked-ROI fast-path still applies once locked,
+# so full SAHI only runs every roi_full_interval frames while a target is held.
+detector:
+  family:     rfdetr
+  model_path: models/rfdetr_medium_576.onnx
+  backend:    tensorrt        # tensorrt EP; use 'onnxruntime' for plain CUDA/CPU
+  precision:  fp16
+  device:     cuda
+  input_size: 576
+  conf:       0.2             # lowered from 0.3: keep faint small-object detections
+  nms_iou:    0.5             # cross-tile IOS merge threshold. Raise toward 0.6 if
+                             # distinct small objects sit close together and get merged.
+  class_map:  coco91          # RF-DETR raw ONNX uses 91-slot COCO ids (person=1)
+
+tiling:
+  enabled:    true
+  tile:       384             # < input_size (576) -> 1.5x upscale = small-object magnify
+  overlap:    0.2             # more robust seams so bisected small objects survive
+  full_frame: false          # OFF on purpose: a whole-frame pass only helps LARGE
+                             # objects, which is the opposite of this config's goal.
+
+input:
+  height:     1440           # higher working res -> more detail per object pre-slice
+  decoder:    auto           # auto (NVDEC + software fallback) | nvdec | software
+                             #   (OT_DECODER env var overrides this)
+
+lock:
+  coast_to_lost:    30
+  reacquire_thresh: 0.75     # raised from 0.6: refuse weak re-acquires. Field logs
+                            # showed wrong near-locks sneaking in at cos~0.60.
+  reacquire_margin: 0.10     # best must beat runner-up by this; refuses an ambiguous
+                            # match when two nearby objects look ~equally like target.
+  verify_thresh:    0.35     # per-frame appearance gate on the matched id; below it
+                            # the track is treated as a miss, so the lock stops
+                            # silently following an id-switch onto a different
+                            # object (ByteTrack reuses ids). 0 disables.
+  reacquire_max_frac: 0.2    # re-acquire search radius cap = this * min(W,H); stops
+                            # re-locking onto a far object after a loss. Lower=stricter.
+  # Locked-ROI fast-path: once locked, detect a crop around the target instead of
+  # full-frame SAHI every frame (much faster; full SAHI still runs every Nth frame
+  # to catch new objects / drift). Set roi_fastpath: false for full SAHI always.
+  roi_fastpath:      true
+  roi_full_interval: 20      # full SAHI every Nth frame while locked
+  roi_scale:         3.0     # ROI side = roi_scale * target's largest dimension
+
+# Appearance ReID for re-acquiring the locked target after occlusion.
+# Independent of detection/tiling — runs on the locked target's box. Set
+# kind: histogram for the model-free fallback.
+reid:
+  kind:       onnx                          # histogram (model-free) | onnx (neural OSNet)
+  model_path: models/reid_osnet_x1_0.onnx
+  backend:    onnxruntime
+  device:     cuda
+  input_w:    128
+  input_h:    256
+
+output:
+  sink: jsonl
+  path: out/track.jsonl

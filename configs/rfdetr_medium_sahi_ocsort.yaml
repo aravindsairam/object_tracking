@@ -27,7 +27,7 @@ detector:
 tiling:
   enabled:    true
   tile:       576             # match input_size -> tiles fed ~1:1 (max detail)
-  overlap:    0.1             # 0.2 = more robust seams, more tiles (slower)
+  overlap:    0.2             # 0.2 = more robust seams, more tiles (slower)
   full_frame: false          # true also runs a whole-frame pass (catches large objects)
 
 # Multi-object tracker. type: ocsort = motion-only, observation-centric (cheap, good
