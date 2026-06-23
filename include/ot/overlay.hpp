@@ -9,10 +9,6 @@
 
 namespace ot {
 
-// Draws detection boxes + "label score" onto `frame` in place.
-void draw_detections(cv::Mat& frame, const std::vector<Detection>& dets,
-                     const ClassMap& class_map);
-
 // Draws tracks with a stable per-id color and "#id label" onto `frame`.
 // If `thin` is true, draws faint/thin boxes (used as background under a lock).
 void draw_tracks(cv::Mat& frame, const std::vector<Track>& tracks,
