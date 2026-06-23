@@ -33,28 +33,6 @@ void draw_label(cv::Mat& frame, const cv::Rect& r, const std::string& text,
 }
 }  // namespace
 
-void draw_detections(cv::Mat& frame, const std::vector<Detection>& dets,
-                     const ClassMap& class_map) {
-    for (const auto& d : dets) {
-        const cv::Rect r = d.box.to_rect();
-        const cv::Scalar color(0, 220, 0);
-        cv::rectangle(frame, r, color, 2);
-
-        char buf[96];
-        std::snprintf(buf, sizeof(buf), "%s %.2f",
-                      class_map.label(d.class_id).c_str(), d.score);
-        const std::string text = buf;
-
-        int base = 0;
-        const cv::Size ts = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.45, 1, &base);
-        const int ty = std::max(r.y, ts.height + 4);
-        cv::rectangle(frame, {r.x, ty - ts.height - 4, ts.width + 6, ts.height + 6},
-                      color, cv::FILLED);
-        cv::putText(frame, text, {r.x + 3, ty - 2}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
-                    {0, 0, 0}, 1, cv::LINE_AA);
-    }
-}
-
 void draw_tracks(cv::Mat& frame, const std::vector<Track>& tracks,
                  const ClassMap& class_map, bool thin) {
     for (const auto& t : tracks) {

@@ -9,7 +9,7 @@ namespace ot {
 struct DetectorCfg {
     std::string family     = "yolo";   // yolo | waldo | unidrone | rfdetr (decode family)
     std::string model_path = "";       // path to the .onnx (or engine, later)
-    std::string backend    = "onnxruntime";  // onnxruntime | tensorrt | ocv_dnn
+    std::string backend    = "onnxruntime";  // onnxruntime | tensorrt
     std::string device     = "cuda";    // cuda | cpu (onnxruntime execution provider)
     std::string precision  = "fp32";    // fp32 | fp16 | int8 (TensorRT EP only)
     std::string int8_calib = "";        // INT8 calibration table path (precision: int8 only)

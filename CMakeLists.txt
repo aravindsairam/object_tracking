@@ -139,4 +139,12 @@ set_target_properties(test_lock_appearance PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# ---- warnings on our own targets (vendored motcpp left untouched) ----------
+# -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance)
+    target_compile_options(${tgt} PRIVATE -Wall -Wextra)
+  endforeach()
+endif()
+
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
