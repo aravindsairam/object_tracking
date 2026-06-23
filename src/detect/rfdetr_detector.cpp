@@ -15,6 +15,13 @@ namespace {
 constexpr float kMean[3] = {0.485f, 0.456f, 0.406f};
 constexpr float kStd[3]  = {0.229f, 0.224f, 0.225f};
 
+// TRT optimization-profile batch range (used both to build the engine and to
+// chunk oversized batches in detect_batch). The engine accepts batches in
+// [kMinBatch, kMaxBatch], tuned for kOptBatch; anything larger is split.
+constexpr int kMinBatch = 1;
+constexpr int kOptBatch = 8;
+constexpr int kMaxBatch = 16;
+
 inline float sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
 
 // Inverse sigmoid: the raw-logit value whose sigmoid equals `p`. Lets the decode
@@ -31,12 +38,14 @@ RfDetrDetector::RfDetrDetector(const DetectorCfg& cfg)
       class_map_(ClassMap::preset(cfg.class_map)),
       kept_ids_(class_map_.kept_ids()),
       logit_thresh_(inverse_sigmoid(cfg.conf)),
-      // TRT optimization profile: one engine spanning batch 1 (locked-ROI path)
-      // .. 16 (SAHI tiles + headroom), tuned for 8 (the typical 1080p tile count).
-      // Input is fixed 3xSxS; tensor name "input" per the RF-DETR ONNX contract.
+      // TRT optimization profile: one engine spanning batch kMinBatch (locked-ROI
+      // path) .. kMaxBatch (SAHI tiles + headroom), tuned for kOptBatch. Tile sets
+      // larger than kMaxBatch (small-tile/high-res SAHI) are chunked in
+      // detect_batch. Input is fixed 3xSxS; tensor name "input" per the ONNX contract.
       backend_(make_backend(cfg.backend, cfg.model_path, cfg.device,
                             cfg.precision, cfg.int8_calib,
-                            TrtProfile{"input", 3, cfg.input_size, cfg.input_size, 1, 8, 16})) {}
+                            TrtProfile{"input", 3, cfg.input_size, cfg.input_size,
+                                       kMinBatch, kOptBatch, kMaxBatch})) {}
 
 void RfDetrDetector::preprocess_into(const cv::Mat& frame, float* dst) const {
     const int S = cfg_.input_size;
@@ -68,6 +77,23 @@ std::vector<std::vector<Detection>> RfDetrDetector::detect_batch(const std::vect
     const int N = static_cast<int>(imgs.size());
     std::vector<std::vector<Detection>> results(N);
     if (N == 0) return results;
+
+    // The TRT engine's optimization profile spans batch [kMinBatch, kMaxBatch]
+    // (see ctor); a larger batch fails setInputShape. Small-tile / high-res SAHI
+    // configs can emit 40+ tiles in one set, so split anything over kMaxBatch into
+    // sub-batches and stitch the results back in order. RF-DETR is compute-bound
+    // per tile, so chunking is perf-neutral, and it caps the input-blob memory at
+    // kMaxBatch tiles regardless of how finely the frame is sliced.
+    if (N > kMaxBatch) {
+        for (int start = 0; start < N; start += kMaxBatch) {
+            const int end = std::min(start + kMaxBatch, N);
+            std::vector<cv::Mat> chunk(imgs.begin() + start, imgs.begin() + end);
+            auto chunk_res = detect_batch(chunk);  // each chunk is <= kMaxBatch
+            for (int i = start; i < end; ++i)
+                results[i] = std::move(chunk_res[i - start]);
+        }
+        return results;
+    }
 
     // One [N,3,S,S] blob; preprocess each image in parallel (dominant cost for
     // many SAHI tiles). Each tile is stretch-resized to S×S, so variable tile
