@@ -1,3 +1,6 @@
+// Mouse-click selector: installs a highgui mouse callback on the display window
+// and records the latest left-click as a point in working-frame coordinates.
+// The app polls poll() each frame to turn a pending click into a lock request.
 #include "ot/selector.hpp"
 
 #include <opencv2/highgui.hpp>

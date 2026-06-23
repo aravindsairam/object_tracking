@@ -25,8 +25,8 @@ output is an on-screen overlay plus a structured per-frame record on disk.
    │  Detector    │   optionally SAHI-tiled for tiny/distant objects)
    └──────┬───────┘
           │ detections
-   ┌──────▼───────┐   give each object a stable ID across frames (ByteTrack + GMC)
-   │  MotTracker  │
+   ┌──────▼───────┐   give each object a stable ID across frames
+   │  MotTracker  │   (ByteTrack / BoT-SORT / OC-SORT — config-selectable)
    └──────┬───────┘
           │ tracks
    ┌──────▼───────┐   you click one → it becomes THE target. State machine keeps
@@ -63,11 +63,16 @@ a system-level decision made by the `LockManager`, gated by independent checks.
    tiles, detects each tile, and merges the results with NMS — a tiny far-away
    object becomes large enough to detect once it's blown up to the network input.
 
-2. **Multi-object tracking (MOT)** — all detections go through **ByteTrack**
-   (from the vendored `motcpp`), which assigns a persistent **track ID** to each
-   object across frames and uses low-confidence detections to keep a flickering
-   object alive. Camera/drone motion is cancelled with **global motion
-   compensation (GMC)**, so IDs stay stable even when the whole frame moves.
+2. **Multi-object tracking (MOT)** — all detections go through a
+   **config-selectable tracker** (from the vendored `motcpp`), which assigns a
+   persistent **track ID** to each object across frames and uses low-confidence
+   detections to keep a flickering object alive. Three are available (set
+   `tracker.type`): **ByteTrack** (IoU + motion only — the fast default),
+   **BoT-SORT** (adds **global motion compensation (GMC)** for camera/drone pan
+   plus ReID appearance fusion — steadiest when the frame moves or similar
+   targets cross), and **OC-SORT** (motion-only but observation-centric, which
+   handles erratic small-object motion better than ByteTrack's linear Kalman at
+   ByteTrack-like cost). See the `tracker` config block below.
 
 3. **Locking one target** — you click an object; the lock snaps to the nearest
    track, stores its **appearance template** (a ReID embedding), and enters the
@@ -233,6 +238,7 @@ RTSP URL, or a camera index like `0`).
 | `--height N` | Working resolution: downscale the frame to N px tall (`0` = native). Overrides the config's `input.height`. Lower = faster, higher = more small-object detail. |
 | `--start N` | Seek to frame N before starting. |
 | `--record FILE` | Write the annotated video to FILE (e.g. `out.mp4`). |
+| `--out FILE` | Write the per-frame locked-target JSONL to FILE, forcing the `jsonl` sink (overrides the config). Intended for A/B eval: same clip + `--autolock`, one FILE per tracker config. |
 | `--loop` | Restart the stream when it ends. |
 | `--profile` | Print pipeline timing (display fps / capture / infer / detection fps / draw / show ms) to stderr every 120 frames. |
 | `--autolock` | Automatically lock the largest/most-central track — for centered tracking or headless runs. |
@@ -275,12 +281,54 @@ keys fall back to sensible defaults.
 > `full_frame`. Fewer tiles = faster. For max recall: `height 1440`,
 > `overlap 0.2`, `full_frame true`. For speed, lower the height and overlap.
 
+### `tracker` — which MOT tracker and how it associates
+
+Switching trackers is a pure config change — the detector feeds the same boxes
+to whichever is selected. ByteTrack is fastest; BoT-SORT is steadiest under
+camera motion; OC-SORT is the best motion-only fit for erratic aerial targets.
+
+| Key | Description |
+|-----|-------------|
+| `type` | `bytetrack` \| `botsort` \| `ocsort`. |
+
+*Shared association knobs (all trackers):*
+
+| Key | Description |
+|-----|-------------|
+| `track_thresh` | High-confidence cut: above it a detection can start/extend a track in the first association pass (BoT-SORT: `track_high_thresh`). |
+| `match_thresh` | Max association cost (1−IoU, or fused) to accept a match. |
+| `track_buffer` | Frames a lost track is retained before deletion (scaled by `frame_rate/30` internally). |
+| `min_conf` | Low-confidence floor: detections between this and `track_thresh` feed the second association pass (BoT-SORT: `track_low_thresh`). |
+| `iou_threshold` | IoU gate for association. Small fast aerial boxes can move >1 box-width/frame, dropping IoU to ~0 even for the right match — lower (e.g. 0.2) if small targets fragment. |
+
+*BoT-SORT only (ignored otherwise):*
+
+| Key | Description |
+|-----|-------------|
+| `new_track_thresh` | Min confidence to spawn a brand-new ID. |
+| `proximity_thresh` | IoU gate before appearance is trusted (rejects far look-alikes). |
+| `appearance_thresh` | Max embedding distance for appearance to fuse into the cost. |
+| `cmc_method` | Camera-motion compensation: `ecc` enables GMC; any other value (e.g. `none`) disables it. |
+| `with_reid` | Fuse ReID appearance (reuses the lock's embedder, see `reid`) into association — one embed per detection per frame. `false` = motion + GMC only. |
+
+*OC-SORT only (ignored otherwise). `max_age`/`delta_t` are frame counts referenced to 30 fps and auto-scaled to the source fps:*
+
+| Key | Description |
+|-----|-------------|
+| `max_age` | Lost-track lifetime before deletion (@30 fps ⇒ ~1 s). Raise to hold a track longer through occlusion (more drift risk). |
+| `delta_t` | Observation window for the velocity-direction estimate (@30 fps ⇒ ~100 ms). |
+| `inertia` | Weight of velocity-direction consistency in the cost (OCM term); higher trusts smooth motion more. |
+| `use_byte` | Also run a ByteTrack-style low-conf second pass (keeps flickering small targets alive). |
+| `q_xy_scaling` | Kalman position process-noise scale. Lower = smoother/laggier box; higher = snappier. |
+| `q_s_scaling` | Kalman scale/size process-noise scale (box-size jitter). |
+
 ### `lock` — single-target lock behavior
 
 | Key | Description |
 |-----|-------------|
-| `coast_to_lost` | Frames the target may vanish before the lock is declared LOST. |
+| `coast_to_lost` | Frames the target may vanish before the lock is declared LOST. Referenced to 30 fps and auto-scaled to the source fps (≈1 s), so the lock doesn't give up after 0.5 s on 60 fps footage. |
 | `reacquire_thresh` | Appearance cosine similarity needed to auto re-lock after a loss. Higher = refuse weak/wrong re-acquires. |
+| `smoothing` | One-Euro smoothing applied to the **displayed/logged** box only (not the tracker state or the ROI-prediction box, which stay raw). `0` = off. Raise toward ~1 for a steadier box at the cost of slight lag — useful for aiming. |
 | `reacquire_margin` | How far the best candidate must beat the runner-up to re-lock — refuses ambiguous matches between two similar objects. |
 | `verify_thresh` | Per-frame appearance gate on the matched track. Below it, the frame is a miss — stops the lock silently following a ByteTrack ID-switch onto a different object. `0` disables. |
 | `reacquire_max_frac` | Re-acquire search radius = this × the frame's short side. Stops re-locking onto a far object after a loss. Lower = stricter. |
@@ -317,7 +365,10 @@ keys fall back to sensible defaults.
 | `configs/unidrone.yaml` | UniDrone aerial model (people/vehicles/boats). |
 | `configs/rfdetr_small.yaml` | RF-DETR small (512px) — fast transformer detector. |
 | `configs/rfdetr_medium.yaml` | RF-DETR medium (576px) — strong on small objects (~68 fps). |
-| `configs/rfdetr_medium_sahi.yaml` | RF-DETR medium + SAHI — max recall on the tiniest/most distant objects. |
+| `configs/rfdetr_medium_sahi.yaml` | RF-DETR medium + SAHI — max recall on the tiniest/most distant objects (ByteTrack, speed-tuned). |
+| `configs/rfdetr_medium_sahi_small.yaml` | Same, retuned (smaller tiles, more overlap, 1440p) for the **tiniest/most distant** objects — trades fps for recall. |
+| `configs/rfdetr_medium_sahi_botsort.yaml` | Same detection as `rfdetr_medium_sahi`, but tracked with **BoT-SORT** (GMC + ReID) — A/B the tracker on identical detections. |
+| `configs/rfdetr_medium_sahi_ocsort.yaml` | Same detection, tracked with **OC-SORT** (motion-only, observation-centric) — best accuracy-per-cost on aerial targets. |
 | `configs/yolo_coco.yaml` | Generic YOLO26 COCO model. |
 
 ---

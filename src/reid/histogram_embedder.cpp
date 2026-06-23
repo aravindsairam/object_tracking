@@ -1,3 +1,7 @@
+// Model-free ReID embedder: a normalized HSV hue-saturation histogram of the
+// box crop. Needs no download or GPU and is weaker than the neural OSNet
+// embedder, but gives a usable appearance signal for lock re-acquisition.
+// See onnx_reid_embedder.cpp for the stronger neural alternative.
 #include "ot/reid.hpp"
 
 #include <opencv2/imgproc.hpp>

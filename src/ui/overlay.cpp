@@ -1,3 +1,7 @@
+// Drawing helpers for the display window: detection boxes, track boxes
+// (per-id colors), the locked target (state-colored box + crosshair + label),
+// and the optional magnified zoom panel. Pure rendering — no detection or
+// tracking logic lives here.
 #include "ot/overlay.hpp"
 
 #include <opencv2/imgproc.hpp>

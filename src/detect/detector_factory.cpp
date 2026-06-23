@@ -1,3 +1,7 @@
+// Builds the detector from config: selects the decode family (YOLO-style head
+// vs RF-DETR transformer) and optionally wraps it in the SAHI TiledDetector.
+// This is the only place that maps a family string to a concrete detector;
+// everything downstream sees the abstract Detector interface.
 #include "ot/detector_factory.hpp"
 
 #include "rfdetr_detector.hpp"

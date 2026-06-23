@@ -1,3 +1,8 @@
+// YAML -> Config loader. One flat function reads each section (detector /
+// tiling / tracker / lock / reid / input / output) via get_or, so any missing
+// key falls back to the default already set on the Config struct. Only the few
+// hard requirements are validated (model paths present, tracker.type known);
+// everything else is optional. Throws on a missing/unparseable file.
 #include "ot/config.hpp"
 
 #include <yaml-cpp/yaml.h>
