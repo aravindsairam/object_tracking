@@ -1,3 +1,7 @@
+// Decoder dispatcher: chooses NVDEC (GPU) or software (OpenCV) decode from the
+// configured policy or the OT_DECODER env override, automatically falling back
+// to software when NVDEC can't handle the input under "auto". Presents whichever
+// decoder it picked behind a single frame-reading interface.
 #include "ot/video_source.hpp"
 
 #include "nvdec_decoder.hpp"

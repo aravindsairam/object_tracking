@@ -1,3 +1,7 @@
+// Neural ReID embedder: runs an OSNet-style ONNX over the box crop and returns
+// an L2-normalized appearance feature. Stronger lock re-acquisition than the
+// HSV histogram embedder. Preprocessing matches torchreid (RGB, ImageNet
+// mean/std). See histogram_embedder.cpp for the model-free fallback.
 #include "ot/reid.hpp"
 #include "ot/inference_backend.hpp"
 

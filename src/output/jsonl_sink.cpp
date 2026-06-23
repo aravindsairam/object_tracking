@@ -1,3 +1,7 @@
+// TargetSink implementations + factory. JsonlSink appends one JSON object per
+// frame (JSON Lines) so a downstream control loop can stream/parse the locked
+// target; NullSink discards everything. make_sink picks one from the
+// output.sink config string ("jsonl" | "none").
 #include "ot/target_sink.hpp"
 
 #include <nlohmann/json.hpp>
