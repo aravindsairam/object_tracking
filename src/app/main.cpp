@@ -486,7 +486,12 @@ int main(int argc, char** argv) {
 
                 const auto td0 = std::chrono::steady_clock::now();
                 if (have_res) {
-                    ot::draw_tracks(df.img, tracks, class_map, /*thin=*/r_locked);
+                    // Dim the background detections only while we actually have a
+                    // target to emphasize (Locked/Coasting). On LOST, r_locked stays
+                    // true so the red "searching" reticle/HUD/sink keep going, but the
+                    // detections must go back to full color — there's nothing to dim
+                    // them under, and the user needs them bright to re-acquire.
+                    ot::draw_tracks(df.img, tracks, class_map, /*thin=*/target.valid());
                     if (r_locked) reticle.draw(df.img, target, class_map, now_s);
                 }
 
