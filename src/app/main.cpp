@@ -426,8 +426,10 @@ int main(int argc, char** argv) {
 
         CapturedFrame shown;             // last composed frame (re-shown while paused)
         bool have_shown = false;
+        ot::LockReticle reticle;         // animated lock overlay (owns its acquire anim)
         double ema_disp_ms = 0.0, ema_ms = 0.0, ema_draw = 0.0, ema_show = 0.0;
         double last_det_fps = 0.0;
+        const auto t_epoch = std::chrono::steady_clock::now();   // monotonic clock for animations
         auto last_show = std::chrono::steady_clock::now();
         auto last_present = std::chrono::steady_clock::now();
         long prof_n = 0;
@@ -440,6 +442,7 @@ int main(int argc, char** argv) {
             const bool fresh = (got == 1);
             if (fresh) {
                 const auto now = std::chrono::steady_clock::now();
+                const double now_s = dur_ms(t_epoch, now) / 1000.0;   // seconds, for animations
                 const double dms = dur_ms(last_show, now);
                 last_show = now;
                 ema_disp_ms = ema_disp_ms == 0.0 ? dms : 0.9 * ema_disp_ms + 0.1 * dms;
@@ -470,7 +473,7 @@ int main(int argc, char** argv) {
                 const auto td0 = std::chrono::steady_clock::now();
                 if (have_res) {
                     ot::draw_tracks(df.img, tracks, class_map, /*thin=*/r_locked);
-                    if (r_locked) ot::draw_locked_target(df.img, target, class_map);
+                    if (r_locked) reticle.draw(df.img, target, class_map, now_s);
                 }
 
                 char hud[256];
