@@ -241,6 +241,20 @@ int main(int argc, char** argv) {
                                           cfg.reid.backend, cfg.reid.device, cfg.reid.precision)
             : ot::make_histogram_embedder();
         std::printf("[run] reid: %s\n", cfg.reid.kind.c_str());
+        // Warm up the ReID embedder so its slow FIRST inference happens HERE, during
+        // startup, instead of inside the user's first lock click. The ONNX backend
+        // defers heavy init (CUDA cuDNN autotune ~0.5 s; TensorRT engine build minutes)
+        // to the first run(). With a motion-only tracker (OC-SORT / ByteTrack, or
+        // BoT-SORT with_reid=false) the tracker never calls embed(), so without this
+        // the entire penalty lands on the first select() — the first lock visibly lags
+        // and looks like it failed to take. One throwaway embed primes the session.
+        if (reid) {
+            const auto tw0 = std::chrono::steady_clock::now();
+            cv::Mat warm(256, 256, CV_8UC3, cv::Scalar(0, 0, 0));
+            (void)reid->embed(warm, ot::BBox{16, 16, 160, 200});
+            const double warm_ms = dur_ms(tw0, std::chrono::steady_clock::now());
+            if (warm_ms > 20.0) std::printf("[run] reid warm-up: %.0f ms\n", warm_ms);
+        }
 
         ot::MotTracker tracker(cfg.tracker, static_cast<int>(fps), reid);
         if (cfg.tracker.type == "botsort")
