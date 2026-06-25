@@ -55,6 +55,8 @@ trt_engine_cache/
 *.mp4
 *.avi
 *.mkv
+# demo videos are committed via Git LFS
+!videos/*.mp4
 
 # ─────────────────────────────────────────────────────────────
 # Python (export scripts, venvs)

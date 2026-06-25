@@ -23,7 +23,6 @@ float dist2(const cv::Point2f& a, const cv::Point2f& b) {
     const float dx = a.x - b.x, dy = a.y - b.y;
     return dx * dx + dy * dy;
 }
-float diag(const BBox& b) { return std::sqrt(b.w * b.w + b.h * b.h); }
 constexpr float kVelAlpha = 0.5f;       // EMA factor for velocity
 constexpr float kTplAlpha = 0.1f;       // EMA factor for appearance template
 

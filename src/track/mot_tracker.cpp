@@ -97,9 +97,6 @@ struct MotTracker::Impl {
     }
 };
 
-MotTracker::MotTracker(int frame_rate)
-    : MotTracker(TrackerCfg{}, frame_rate, nullptr) {}
-
 MotTracker::MotTracker(const TrackerCfg& cfg, int frame_rate, std::shared_ptr<ReidEmbedder> reid)
     : impl_(std::make_unique<Impl>(cfg, frame_rate, std::move(reid))) {}
 
