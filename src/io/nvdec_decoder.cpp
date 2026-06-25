@@ -1,3 +1,8 @@
+// Hardware video decode via FFmpeg's NVDEC (cuvid) decoders — H.264/HEVC/AV1/
+// VP9/MPEG-2 — with optional GPU-side downscale to the working height. Yields
+// BGR cv::Mat frames. Construction throws when the codec has no NVDEC decoder
+// or no capable GPU is present; VideoSource catches that and falls back to the
+// software (OpenCV) decoder.
 #include "nvdec_decoder.hpp"
 
 #include <opencv2/core.hpp>

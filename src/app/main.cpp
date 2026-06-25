@@ -241,6 +241,20 @@ int main(int argc, char** argv) {
                                           cfg.reid.backend, cfg.reid.device, cfg.reid.precision)
             : ot::make_histogram_embedder();
         std::printf("[run] reid: %s\n", cfg.reid.kind.c_str());
+        // Warm up the ReID embedder so its slow FIRST inference happens HERE, during
+        // startup, instead of inside the user's first lock click. The ONNX backend
+        // defers heavy init (CUDA cuDNN autotune ~0.5 s; TensorRT engine build minutes)
+        // to the first run(). With a motion-only tracker (OC-SORT / ByteTrack, or
+        // BoT-SORT with_reid=false) the tracker never calls embed(), so without this
+        // the entire penalty lands on the first select() — the first lock visibly lags
+        // and looks like it failed to take. One throwaway embed primes the session.
+        if (reid) {
+            const auto tw0 = std::chrono::steady_clock::now();
+            cv::Mat warm(256, 256, CV_8UC3, cv::Scalar(0, 0, 0));
+            (void)reid->embed(warm, ot::BBox{16, 16, 160, 200});
+            const double warm_ms = dur_ms(tw0, std::chrono::steady_clock::now());
+            if (warm_ms > 20.0) std::printf("[run] reid warm-up: %.0f ms\n", warm_ms);
+        }
 
         ot::MotTracker tracker(cfg.tracker, static_cast<int>(fps), reid);
         if (cfg.tracker.type == "botsort")
@@ -426,8 +440,10 @@ int main(int argc, char** argv) {
 
         CapturedFrame shown;             // last composed frame (re-shown while paused)
         bool have_shown = false;
+        ot::LockReticle reticle;         // animated lock overlay (owns its acquire anim)
         double ema_disp_ms = 0.0, ema_ms = 0.0, ema_draw = 0.0, ema_show = 0.0;
         double last_det_fps = 0.0;
+        const auto t_epoch = std::chrono::steady_clock::now();   // monotonic clock for animations
         auto last_show = std::chrono::steady_clock::now();
         auto last_present = std::chrono::steady_clock::now();
         long prof_n = 0;
@@ -440,6 +456,7 @@ int main(int argc, char** argv) {
             const bool fresh = (got == 1);
             if (fresh) {
                 const auto now = std::chrono::steady_clock::now();
+                const double now_s = dur_ms(t_epoch, now) / 1000.0;   // seconds, for animations
                 const double dms = dur_ms(last_show, now);
                 last_show = now;
                 ema_disp_ms = ema_disp_ms == 0.0 ? dms : 0.9 * ema_disp_ms + 0.1 * dms;
@@ -469,8 +486,13 @@ int main(int argc, char** argv) {
 
                 const auto td0 = std::chrono::steady_clock::now();
                 if (have_res) {
-                    ot::draw_tracks(df.img, tracks, class_map, /*thin=*/r_locked);
-                    if (r_locked) ot::draw_locked_target(df.img, target, class_map);
+                    // Dim the background detections only while we actually have a
+                    // target to emphasize (Locked/Coasting). On LOST, r_locked stays
+                    // true so the red "searching" reticle/HUD/sink keep going, but the
+                    // detections must go back to full color — there's nothing to dim
+                    // them under, and the user needs them bright to re-acquire.
+                    ot::draw_tracks(df.img, tracks, class_map, /*thin=*/target.valid());
+                    if (r_locked) reticle.draw(df.img, target, class_map, now_s);
                 }
 
                 char hud[256];

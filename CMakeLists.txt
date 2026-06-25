@@ -139,4 +139,20 @@ set_target_properties(test_lock_appearance PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# Logic-only unit test for the lock-reticle animation helpers (no GPU/render).
+add_executable(test_lock_reticle tools/test_lock_reticle.cpp)
+target_link_libraries(test_lock_reticle PRIVATE ot_core)
+target_link_options(test_lock_reticle PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(test_lock_reticle PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
+# ---- warnings on our own targets (vendored motcpp left untouched) ----------
+# -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle)
+    target_compile_options(${tgt} PRIVATE -Wall -Wextra)
+  endforeach()
+endif()
+
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")

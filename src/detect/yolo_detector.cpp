@@ -1,3 +1,7 @@
+// Detector for the YOLO output family (YOLO / WALDO / UniDrone). Letterboxes
+// the input to a square, runs the backend (batched so SAHI tiles share one
+// inference call), then decodes either a raw anchor-free head (+NMS here) or an
+// NMS-embedded head into Detections. The class_map filters to person/vehicle.
 #include "yolo_detector.hpp"
 
 #include <opencv2/dnn.hpp>      // blobFromImage (preprocessing only)
