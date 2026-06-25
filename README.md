@@ -17,11 +17,11 @@ overlay plus a structured per-frame record on disk.
 A single clicked target stays locked through camera motion and nearby look-alikes,
 with the animated reticle marking the locked object:
 
-<video src="https://github.com/aravindsairam/object_tracking/raw/main/videos/d1.mp4" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/f0062e74-1bb4-4f90-8a76-1f350c8e213b" controls muted loop width="800"></video>
 
-<video src="https://github.com/aravindsairam/object_tracking/raw/main/videos/d2.mp4" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/5535745f-c6b6-4d19-9a40-b86f483f92d7" controls muted loop width="800"></video>
 
-<video src="https://github.com/aravindsairam/object_tracking/raw/main/videos/d3.mp4" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/b2a26781-33e4-4fb6-b142-02f8469b4967" controls muted loop width="800"></video>
 
 ---
 
