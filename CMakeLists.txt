@@ -147,10 +147,20 @@ set_target_properties(test_lock_reticle PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# Offline detection dumper for the backend-parity / COCO-mAP accuracy audit
+# (needs the RfDetrDetector header for raw-output access, hence src/detect).
+add_executable(parity_dump tools/parity_dump.cpp)
+target_link_libraries(parity_dump PRIVATE ot_core)
+target_include_directories(parity_dump PRIVATE ${CMAKE_SOURCE_DIR}/src/detect)
+target_link_options(parity_dump PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(parity_dump PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
 # ---- warnings on our own targets (vendored motcpp left untouched) ----------
 # -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle)
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle parity_dump)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endforeach()
 endif()

@@ -151,6 +151,34 @@ std::vector<std::vector<Detection>> RfDetrDetector::detect_batch(const std::vect
     return results;
 }
 
+std::pair<cv::Mat, cv::Mat> RfDetrDetector::run_raw(const std::vector<cv::Mat>& imgs) {
+    const int N = static_cast<int>(imgs.size());
+    CV_Assert(N >= 1 && N <= kMaxBatch);
+    const int S = cfg_.input_size;
+    const int sizes[4] = {N, 3, S, S};
+    blob_.create(4, sizes, CV_32F);
+    cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& rng) {
+        for (int n = rng.start; n < rng.end; ++n) {
+            preprocess_into(imgs[n], blob_.ptr<float>() + static_cast<size_t>(n) * 3 * S * S);
+        }
+    });
+    auto outs = backend_->run_multi(blob_);
+    if (outs.size() < 2) {
+        throw std::runtime_error("RfDetrDetector::run_raw: expected 2 outputs, got "
+                                 + std::to_string(outs.size()));
+    }
+    int bi = -1, li = -1;
+    for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+        if (outs[i].dims < 3) continue;
+        if (outs[i].size[outs[i].dims - 1] == 4) bi = i;
+        else                                     li = i;
+    }
+    if (bi < 0 || li < 0) {
+        throw std::runtime_error("RfDetrDetector::run_raw: could not identify boxes/logits");
+    }
+    return {std::move(outs[bi]), std::move(outs[li])};
+}
+
 std::vector<Detection> RfDetrDetector::decode_one(const float* bptr, const float* lptr,
                                                   int Q, int C, int frame_w, int frame_h) const {
     std::vector<Detection> dets;
