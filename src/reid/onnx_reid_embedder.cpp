@@ -23,7 +23,11 @@ public:
                      const std::string& backend, const std::string& device,
                      const std::string& precision)
         : in_w_(input_w), in_h_(input_h),
-          backend_(make_backend(backend, model_path, device, precision)) {}
+          // Fixed batch-1 TRT profile (embed() is one crop per call): without
+          // it the TensorRT EP rebuilds the engine on first use for minutes.
+          // Ignored by the non-TRT backends. OSNet input name: "input".
+          backend_(make_backend(backend, model_path, device, precision, "",
+                                TrtProfile{"input", 3, input_h, input_w, 1, 1, 1})) {}
 
     Embedding embed(const cv::Mat& frame, const BBox& box) override {
         const cv::Rect r = box.to_rect() & cv::Rect(0, 0, frame.cols, frame.rows);
