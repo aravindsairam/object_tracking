@@ -45,7 +45,8 @@ RfDetrDetector::RfDetrDetector(const DetectorCfg& cfg)
       backend_(make_backend(cfg.backend, cfg.model_path, cfg.device,
                             cfg.precision, cfg.int8_calib,
                             TrtProfile{"input", 3, cfg.input_size, cfg.input_size,
-                                       kMinBatch, kOptBatch, kMaxBatch})) {}
+                                       kMinBatch, kOptBatch, kMaxBatch,
+                                       /*nhwc=*/cfg.input_u8})) {}
 
 void RfDetrDetector::preprocess_into(const cv::Mat& frame, float* dst) const {
     const int S = cfg_.input_size;
@@ -140,6 +141,34 @@ std::vector<cv::Mat> RfDetrDetector::infer_batch(const std::vector<cv::Mat>& img
     const int N = static_cast<int>(imgs.size());
     const int S = cfg_.input_size;
     const size_t per = static_cast<size_t>(3) * S * S;
+
+    if (cfg_.input_u8) {
+        // In-graph preprocessing model (uint8 NHWC BGR, scripts/make_uint8_onnx.py):
+        // "preprocess" is just a stretch-resize into the staging buffer — no
+        // cvtColor, no fp32 normalize (both live in the ONNX graph, bit-exact
+        // vs the folded CPU math) — and the upload is 4x smaller.
+        uint8_t* pinned = backend_->pinned_input_u8(static_cast<size_t>(kMaxBatch) * per);
+        uint8_t* dst = pinned;
+        if (!dst) {
+            const int sizes[4] = {N, S, S, 3};
+            blob_.create(4, sizes, CV_8U);
+            dst = blob_.ptr<uint8_t>();
+        }
+        cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& rng) {
+            for (int n = rng.start; n < rng.end; ++n) {
+                cv::Mat slot(S, S, CV_8UC3, dst + static_cast<size_t>(n) * per);
+                if (imgs[n].cols == S && imgs[n].rows == S) {
+                    imgs[n].copyTo(slot);   // exact-size tile: plain copy
+                } else {
+                    cv::resize(imgs[n], slot, slot.size(), 0, 0, cv::INTER_LINEAR);
+                }
+            }
+        });
+        if (pinned) {
+            return backend_->run_pinned_u8({static_cast<int64_t>(N), S, S, 3});
+        }
+        return backend_->run_multi(blob_);
+    }
 
     // Ask for the full engine-max slab up front so the pinned buffer never
     // regrows (pinned alloc/free is expensive) and the batch=1 ROI path reuses

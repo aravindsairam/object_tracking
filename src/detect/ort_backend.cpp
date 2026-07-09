@@ -64,9 +64,12 @@ OrtBackend::OrtBackend(const std::string& model_path, bool use_cuda, bool use_te
             // tuned for `opt`. Without this each new batch triggers a fresh
             // (minutes-long) engine build. Strings must outlive UpdateTRT below.
             auto shape_str = [&](int b) {
+                const std::string c = std::to_string(profile.c);
+                const std::string h = std::to_string(profile.h);
+                const std::string w = std::to_string(profile.w);
                 return profile.input_name + ":" + std::to_string(b) + "x" +
-                       std::to_string(profile.c) + "x" + std::to_string(profile.h) + "x" +
-                       std::to_string(profile.w);
+                       (profile.nhwc ? h + "x" + w + "x" + c   // uint8 in-graph preproc
+                                     : c + "x" + h + "x" + w);
             };
             const std::string prof_min = profile.enabled() ? shape_str(profile.min_batch) : "";
             const std::string prof_opt = profile.enabled() ? shape_str(profile.opt_batch) : "";
@@ -162,28 +165,49 @@ OrtBackend::OrtBackend(const std::string& model_path, bool use_cuda, bool use_te
                  pinned_alloc_ ? ", pinned IO" : "");
 }
 
-float* OrtBackend::pinned_input(size_t float_count) {
+void* OrtBackend::pinned_bytes(size_t bytes) {
     if (!pinned_alloc_) return nullptr;
-    if (float_count > pinned_in_count_) {       // grow to high-water, keep forever
+    if (bytes > pinned_in_bytes_) {             // grow to high-water, keep forever
         pinned_in_.reset();
-        pinned_in_.emplace(pinned_alloc_->GetAllocation(float_count * sizeof(float)));
-        pinned_in_count_ = float_count;
+        pinned_in_.emplace(pinned_alloc_->GetAllocation(bytes));
+        pinned_in_bytes_ = bytes;
     }
-    return static_cast<float*>(pinned_in_->get());
+    return pinned_in_->get();
+}
+
+float* OrtBackend::pinned_input(size_t float_count) {
+    return static_cast<float*>(pinned_bytes(float_count * sizeof(float)));
+}
+
+uint8_t* OrtBackend::pinned_input_u8(size_t byte_count) {
+    return static_cast<uint8_t*>(pinned_bytes(byte_count));
 }
 
 std::vector<cv::Mat> OrtBackend::run_pinned(const std::array<int64_t, 4>& shape) {
+    return run_pinned_impl(shape, /*u8=*/false);
+}
+
+std::vector<cv::Mat> OrtBackend::run_pinned_u8(const std::array<int64_t, 4>& shape_nhwc) {
+    return run_pinned_impl(shape_nhwc, /*u8=*/true);
+}
+
+std::vector<cv::Mat> OrtBackend::run_pinned_impl(const std::array<int64_t, 4>& shape, bool u8) {
     if (!binding_ || !pinned_in_) {
         throw std::runtime_error("run_pinned: pinned path unavailable (call pinned_input first)");
     }
     const size_t count = static_cast<size_t>(shape[0] * shape[1] * shape[2] * shape[3]);
-    CV_Assert(count <= pinned_in_count_);
+    CV_Assert(count * (u8 ? 1 : sizeof(float)) <= pinned_in_bytes_);
 
     const Ort::MemoryInfo pin_info("CudaPinned", OrtDeviceAllocator, 0, OrtMemTypeCPUOutput);
     // Non-owning tensor over the pinned slab; the binding shares the underlying
     // tensor, so the local Value may go out of scope after BindInput.
-    Ort::Value in = Ort::Value::CreateTensor<float>(
-        pin_info, static_cast<float*>(pinned_in_->get()), count, shape.data(), shape.size());
+    Ort::Value in = u8
+        ? Ort::Value::CreateTensor<uint8_t>(
+              pin_info, static_cast<uint8_t*>(pinned_in_->get()), count,
+              shape.data(), shape.size())
+        : Ort::Value::CreateTensor<float>(
+              pin_info, static_cast<float*>(pinned_in_->get()), count,
+              shape.data(), shape.size());
     binding_->BindInput(input_names_[0], in);
     // Rebind outputs whenever the batch changes: ORT materializes a concrete
     // output tensor on the first Run after a BindOutput-by-memory-info and
@@ -206,16 +230,21 @@ std::vector<cv::Mat> OrtBackend::run_pinned(const std::array<int64_t, 4>& shape)
 }
 
 std::vector<cv::Mat> OrtBackend::run_multi(const cv::Mat& blob_nchw) {
-    CV_Assert(blob_nchw.dims == 4 && blob_nchw.type() == CV_32F && blob_nchw.isContinuous());
+    CV_Assert(blob_nchw.dims == 4 && blob_nchw.isContinuous() &&
+              (blob_nchw.type() == CV_32F || blob_nchw.type() == CV_8U));
     const std::array<int64_t, 4> in_shape = {
         blob_nchw.size[0], blob_nchw.size[1], blob_nchw.size[2], blob_nchw.size[3]};
     const size_t in_count = static_cast<size_t>(
         in_shape[0] * in_shape[1] * in_shape[2] * in_shape[3]);
 
     Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    Ort::Value in = Ort::Value::CreateTensor<float>(
-        mem, const_cast<float*>(blob_nchw.ptr<float>()), in_count,
-        in_shape.data(), in_shape.size());
+    Ort::Value in = blob_nchw.type() == CV_8U
+        ? Ort::Value::CreateTensor<uint8_t>(
+              mem, const_cast<uint8_t*>(blob_nchw.ptr<uint8_t>()), in_count,
+              in_shape.data(), in_shape.size())
+        : Ort::Value::CreateTensor<float>(
+              mem, const_cast<float*>(blob_nchw.ptr<float>()), in_count,
+              in_shape.data(), in_shape.size());
 
     const auto t0 = std::chrono::steady_clock::now();
     auto outs = session_.Run(Ort::RunOptions{nullptr}, input_names_.data(), &in, 1,
