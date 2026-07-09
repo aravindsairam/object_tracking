@@ -19,6 +19,8 @@ struct TrtProfile {
     std::string input_name;            // model input tensor name (RF-DETR: "input")
     int c = 0, h = 0, w = 0;           // fixed channel + spatial dims
     int min_batch = 0, opt_batch = 0, max_batch = 0;
+    bool nhwc = false;                 // input laid out NxHxWxC (uint8 in-graph
+                                       // preprocess models) instead of NxCxHxW
     bool enabled() const {
         return !input_name.empty() && c > 0 && h > 0 && w > 0 &&
                min_batch >= 1 && opt_batch >= min_batch && max_batch >= opt_batch;
@@ -54,6 +56,13 @@ public:
     virtual float* pinned_input(size_t /*float_count*/) { return nullptr; }
     virtual std::vector<cv::Mat> run_pinned(const std::array<int64_t, 4>& /*shape*/) {
         throw std::runtime_error("run_pinned: not supported by this backend");
+    }
+    // Same pair for models with in-graph preprocessing (uint8 NHWC input, see
+    // scripts/make_uint8_onnx.py): the caller stages RAW RESIZED PIXELS and
+    // the upload is 4x smaller than the fp32 blob.
+    virtual uint8_t* pinned_input_u8(size_t /*byte_count*/) { return nullptr; }
+    virtual std::vector<cv::Mat> run_pinned_u8(const std::array<int64_t, 4>& /*shape_nhwc*/) {
+        throw std::runtime_error("run_pinned_u8: not supported by this backend");
     }
 
     virtual std::string name() const = 0;

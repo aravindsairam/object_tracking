@@ -14,6 +14,9 @@ struct DetectorCfg {
     std::string precision  = "fp32";    // fp32 | fp16 | int8 (TensorRT EP only)
     std::string int8_calib = "";        // INT8 calibration table path (precision: int8 only)
     int         input_size = 640;       // square network input
+    bool        input_u8   = false;     // model has in-graph preprocessing and takes
+                                        // raw uint8 NHWC BGR pixels (rfdetr only;
+                                        // export with scripts/make_uint8_onnx.py)
     float       conf       = 0.25f;     // score threshold
     float       nms_iou    = 0.45f;     // NMS IoU (raw-head models only)
     std::string class_map  = "coco";    // coco | waldo | unidrone — which ids are people/vehicles
