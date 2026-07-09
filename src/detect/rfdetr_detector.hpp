@@ -47,6 +47,10 @@ private:
     // come back normalized to this stretched space, so undoing the resize is just
     // a multiply by the frame's own width/height.
     void preprocess_into(const cv::Mat& frame, float* dst) const;
+    // Preprocess N (<= engine max batch) images and run one batched inference.
+    // Prefers the backend's pinned staging buffer (fast DMA H2D + IoBinding);
+    // falls back to the reusable pageable blob_ when the backend has none.
+    std::vector<cv::Mat> infer_batch(const std::vector<cv::Mat>& imgs);
     std::vector<Detection> decode_one(const float* boxes, const float* logits,
                                       int Q, int C, int frame_w, int frame_h) const;
 };

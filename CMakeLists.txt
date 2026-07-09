@@ -157,10 +157,19 @@ set_target_properties(parity_dump PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# Headless regression test: batch-size switches (SAHI batch <-> ROI batch-1)
+# through one detector session must not crash (the locked-ROI path does this).
+add_executable(test_batch_switch tools/test_batch_switch.cpp)
+target_link_libraries(test_batch_switch PRIVATE ot_core)
+target_link_options(test_batch_switch PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(test_batch_switch PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
 # ---- warnings on our own targets (vendored motcpp left untouched) ----------
 # -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle parity_dump)
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle parity_dump test_batch_switch)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endforeach()
 endif()
