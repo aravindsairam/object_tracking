@@ -101,11 +101,13 @@ OrtBackend::OrtBackend(const std::string& model_path, bool use_cuda, bool use_te
         }
     }
 
+    bool cuda_active = false;
     if (use_cuda) {
         try {
             OrtCUDAProviderOptions cuda{};
             cuda.device_id = 0;
             opts_.AppendExecutionProvider_CUDA(cuda);  // throws if the provider can't load
+            cuda_active = true;
             if (!trt_active) name_ = "onnxruntime(cuda)";
         } catch (const Ort::Exception& e) {
             std::fprintf(stderr,
@@ -137,7 +139,70 @@ OrtBackend::OrtBackend(const std::string& model_path, bool use_cuda, bool use_te
         output_name_store_.push_back(session_.GetOutputNameAllocated(i, alloc_).get());
     for (const auto& s : input_name_store_)  input_names_.push_back(s.c_str());
     for (const auto& s : output_name_store_) output_names_.push_back(s.c_str());
-    std::fprintf(stderr, "[ort] backend = %s (%zu in, %zu out)\n", name_.c_str(), n_in, n_out);
+
+    // Pinned-memory IoBinding fast path: needs the CudaPinned allocator that the
+    // CUDA EP registers on the session. Page-locked input staging turns the H2D
+    // upload into an async DMA (a batch-8 fp32 blob is ~32 MB — several ms from
+    // pageable memory), and binding outputs to pinned memory speeds up D2H the
+    // same way. Best-effort: without a GPU EP the pageable path still works.
+    if (trt_active || cuda_active) {
+        try {
+            const Ort::MemoryInfo pin_info("CudaPinned", OrtDeviceAllocator, 0,
+                                           OrtMemTypeCPUOutput);
+            pinned_alloc_.emplace(session_, pin_info);
+            binding_.emplace(session_);
+        } catch (const std::exception& e) {
+            pinned_alloc_.reset();
+            binding_.reset();
+            std::fprintf(stderr,
+                "[ort] pinned allocator unavailable (%s) — using pageable IO\n", e.what());
+        }
+    }
+    std::fprintf(stderr, "[ort] backend = %s (%zu in, %zu out%s)\n", name_.c_str(), n_in, n_out,
+                 pinned_alloc_ ? ", pinned IO" : "");
+}
+
+float* OrtBackend::pinned_input(size_t float_count) {
+    if (!pinned_alloc_) return nullptr;
+    if (float_count > pinned_in_count_) {       // grow to high-water, keep forever
+        pinned_in_.reset();
+        pinned_in_.emplace(pinned_alloc_->GetAllocation(float_count * sizeof(float)));
+        pinned_in_count_ = float_count;
+    }
+    return static_cast<float*>(pinned_in_->get());
+}
+
+std::vector<cv::Mat> OrtBackend::run_pinned(const std::array<int64_t, 4>& shape) {
+    if (!binding_ || !pinned_in_) {
+        throw std::runtime_error("run_pinned: pinned path unavailable (call pinned_input first)");
+    }
+    const size_t count = static_cast<size_t>(shape[0] * shape[1] * shape[2] * shape[3]);
+    CV_Assert(count <= pinned_in_count_);
+
+    const Ort::MemoryInfo pin_info("CudaPinned", OrtDeviceAllocator, 0, OrtMemTypeCPUOutput);
+    // Non-owning tensor over the pinned slab; the binding shares the underlying
+    // tensor, so the local Value may go out of scope after BindInput.
+    Ort::Value in = Ort::Value::CreateTensor<float>(
+        pin_info, static_cast<float*>(pinned_in_->get()), count, shape.data(), shape.size());
+    binding_->BindInput(input_names_[0], in);
+    // Rebind outputs whenever the batch changes: ORT materializes a concrete
+    // output tensor on the first Run after a BindOutput-by-memory-info and
+    // REUSES it on later Runs — right while the shape is stable (zero-alloc
+    // steady state), stale the moment the batch switches (SAHI batch-12 ->
+    // locked-ROI batch-1 aborted with "output batch != input batch").
+    // Clearing + rebinding by memory info forces a fresh right-shaped tensor.
+    if (shape[0] != bound_out_batch_) {
+        binding_->ClearBoundOutputs();
+        for (const char* n : output_names_) binding_->BindOutput(n, pin_info);
+        bound_out_batch_ = shape[0];
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+    session_.Run(Ort::RunOptions{nullptr}, *binding_);
+    auto outs = binding_->GetOutputValues();
+    note_run(std::chrono::duration<double, std::milli>(
+                 std::chrono::steady_clock::now() - t0).count(), shape[0]);
+    return to_mats(outs);
 }
 
 std::vector<cv::Mat> OrtBackend::run_multi(const cv::Mat& blob_nchw) {
@@ -155,17 +220,12 @@ std::vector<cv::Mat> OrtBackend::run_multi(const cv::Mat& blob_nchw) {
     const auto t0 = std::chrono::steady_clock::now();
     auto outs = session_.Run(Ort::RunOptions{nullptr}, input_names_.data(), &in, 1,
                              output_names_.data(), output_names_.size());
-    if (profile_) {
-        const auto t1 = std::chrono::steady_clock::now();
-        infer_ms_sum_ += std::chrono::duration<double, std::milli>(t1 - t0).count();
-        if (++infer_calls_ % 120 == 0) {
-            std::fprintf(stderr, "[profile] %s: inference (Run incl. copies) avg %.2f ms"
-                         " over %ld calls  (batch=%lld)\n",
-                         name_.c_str(), infer_ms_sum_ / infer_calls_, infer_calls_,
-                         static_cast<long long>(in_shape[0]));
-        }
-    }
+    note_run(std::chrono::duration<double, std::milli>(
+                 std::chrono::steady_clock::now() - t0).count(), in_shape[0]);
+    return to_mats(outs);
+}
 
+std::vector<cv::Mat> OrtBackend::to_mats(std::vector<Ort::Value>& outs) {
     std::vector<cv::Mat> results;
     results.reserve(outs.size());
     for (auto& out : outs) {
@@ -179,6 +239,17 @@ std::vector<cv::Mat> OrtBackend::run_multi(const cv::Mat& blob_nchw) {
         results.push_back(std::move(m));
     }
     return results;
+}
+
+void OrtBackend::note_run(double ms, int64_t batch) {
+    if (!profile_) return;
+    infer_ms_sum_ += ms;
+    if (++infer_calls_ % 120 == 0) {
+        std::fprintf(stderr, "[profile] %s: inference (Run incl. copies) avg %.2f ms"
+                     " over %ld calls  (batch=%lld)\n",
+                     name_.c_str(), infer_ms_sum_ / infer_calls_, infer_calls_,
+                     static_cast<long long>(batch));
+    }
 }
 
 cv::Mat OrtBackend::run(const cv::Mat& blob_nchw) {
