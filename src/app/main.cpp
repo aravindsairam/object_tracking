@@ -22,8 +22,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -354,37 +356,101 @@ int main(int argc, char** argv) {
             const int full_every = std::max(1, cfg.lock.roi_full_interval);
             double det_ema = 0.0;
             auto t_prev = std::chrono::steady_clock::now();
+
+            // One-deep software pipeline for the FULL-SAHI path: launch frame
+            // N+1's detect on a worker before blocking on frame N's result, so
+            // this thread's tail work (tracker/lock/publish of N) overlaps
+            // N+1's GPU time. detect() itself is not thread-safe (shared
+            // staging buffers), so worker calls serialize on det_mutex — the
+            // GPU is serial anyway, the overlap that pays is tail-vs-Run.
+            // The locked-ROI path stays SERIAL: its crop is predicted from the
+            // PREVIOUS frame's lock state, so launching ahead would predict
+            // from stale state. Detections are identical to the serial loop
+            // (same frames, same order, same detect calls).
+            struct Inflight {
+                CapturedFrame in;
+                std::future<std::vector<ot::Detection>> dets;
+                std::chrono::steady_clock::time_point t0;
+            };
+            std::optional<Inflight> ahead;
+            std::mutex det_mutex;
+            auto launch_full = [&](CapturedFrame&& f) {
+                Inflight fl;
+                fl.in = std::move(f);
+                fl.t0 = std::chrono::steady_clock::now();
+                const cv::Mat img = fl.in.img;   // shared header; worker reads only
+                ot::Detector* det = detector.get();
+                fl.dets = std::async(std::launch::async, [det, img, &det_mutex] {
+                    std::lock_guard<std::mutex> g(det_mutex);
+                    return det->detect(img);
+                });
+                return fl;
+            };
+
             while (running.load()) {
-                if (!infer_q.pop(in)) break;                // closed + drained
+                std::vector<ot::Detection> dets;
+                bool use_roi = false;
+                std::chrono::steady_clock::time_point t0;
+
+                if (ahead) {
+                    // Consume the prefetched full-SAHI frame; top up the pipeline
+                    // BEFORE blocking on its result so the next detect queues
+                    // behind it on the GPU while we run this frame's tail below.
+                    Inflight cur = std::move(*ahead);
+                    ahead.reset();
+                    in = std::move(cur.in);
+                    t0 = cur.t0;
+                    CapturedFrame next;
+                    if (last_target.state != ot::LockState::Locked &&
+                        infer_q.pop_for(next, std::chrono::milliseconds(0)) == 1) {
+                        ahead = launch_full(std::move(next));
+                    }
+                    dets = cur.dets.get();
+                } else {
+                    if (!infer_q.pop(in)) break;            // closed + drained
+
+                    // Locked-ROI fast-path: while solidly locked, detect only a
+                    // crop around the predicted target (cheap) — except every
+                    // Nth frame, when full SAHI runs to catch new objects and
+                    // correct drift. Any non-Locked state (Coasting/Lost/
+                    // Acquiring) also takes the full path, so a target that
+                    // slips out of the crop self-recovers.
+                    use_roi = cfg.lock.roi_fastpath
+                           && last_target.state == ot::LockState::Locked
+                           && (infer_frame % full_every != 0);
+
+                    t0 = std::chrono::steady_clock::now();
+                    if (use_roi) {
+                        const cv::Rect roi = predict_roi(last_target, cfg.lock.roi_scale, fps, W, H);
+                        std::lock_guard<std::mutex> g(det_mutex);
+                        auto local = detector->detect(in.img(roi));
+                        dets.reserve(local.size());
+                        for (ot::Detection d : local) {     // shift crop-space boxes to frame space
+                            d.box.x += roi.x;
+                            d.box.y += roi.y;
+                            dets.push_back(d);
+                        }
+                    } else {
+                        // Enter the pipeline: launch this frame and, unless we are
+                        // locked (the next frame then belongs to the ROI path),
+                        // prefetch the next one behind it.
+                        Inflight cur = launch_full(std::move(in));
+                        in = std::move(cur.in);
+                        t0 = cur.t0;
+                        CapturedFrame next;
+                        if (last_target.state != ot::LockState::Locked &&
+                            infer_q.pop_for(next, std::chrono::milliseconds(0)) == 1) {
+                            ahead = launch_full(std::move(next));
+                        }
+                        dets = cur.dets.get();
+                    }
+                }
 
                 bool do_reset = false, do_click = false;
                 cv::Point2f click;
                 cmds.drain(do_reset, do_click, click);
                 if (do_reset) { lock.reset(); last_target = ot::TargetState{}; }
 
-                // Locked-ROI fast-path: while solidly locked, detect only a crop
-                // around the predicted target (cheap) — except every Nth frame,
-                // when full SAHI runs to catch new objects and correct drift. Any
-                // non-Locked state (Coasting/Lost/Acquiring) also takes the full
-                // path, so a target that slips out of the crop self-recovers.
-                const bool use_roi = cfg.lock.roi_fastpath
-                                  && last_target.state == ot::LockState::Locked
-                                  && (infer_frame % full_every != 0);
-
-                const auto t0 = std::chrono::steady_clock::now();
-                std::vector<ot::Detection> dets;
-                if (use_roi) {
-                    const cv::Rect roi = predict_roi(last_target, cfg.lock.roi_scale, fps, W, H);
-                    auto local = detector->detect(in.img(roi));
-                    dets.reserve(local.size());
-                    for (ot::Detection d : local) {         // shift crop-space boxes to frame space
-                        d.box.x += roi.x;
-                        d.box.y += roi.y;
-                        dets.push_back(d);
-                    }
-                } else {
-                    dets = detector->detect(in.img);        // full-frame SAHI
-                }
                 auto tracks = tracker.update(in.img, dets);
                 const double infer_ms = dur_ms(t0, std::chrono::steady_clock::now());
 
