@@ -43,11 +43,27 @@ OrtBackend::OrtBackend(const std::string& model_path, bool use_cuda, bool use_te
                 (model_dir.empty() ? std::filesystem::path("trt_engine_cache")
                                    : model_dir / "trt_engine_cache").string();
 
+            // Fixed-batch profiles get their own cache prefix: the EP would
+            // otherwise load the dynamic-profile engine for the same model
+            // (its range covers the fixed batch), silently skipping the
+            // batch-specialized build this session exists for. The historical
+            // dynamic-profile prefix is unchanged so cached engines survive.
+            std::string cache_prefix = "ot_rfdetr";
+            if (profile.enabled() && profile.min_batch == profile.max_batch) {
+                cache_prefix += "_b" + std::to_string(profile.min_batch);
+            }
+
             std::vector<const char*> keys, vals;
             keys.push_back("device_id");                    vals.push_back("0");
             keys.push_back("trt_engine_cache_enable");      vals.push_back("1");
             keys.push_back("trt_engine_cache_path");        vals.push_back(engine_cache_path.c_str());
-            keys.push_back("trt_engine_cache_prefix");      vals.push_back("ot_rfdetr");
+            keys.push_back("trt_engine_cache_prefix");      vals.push_back(cache_prefix.c_str());
+            // Do NOT add trt_cuda_graph_enable here: probed 2026-07 on a fixed
+            // batch-1 profile with pinned IoBinding — ORT's CUDA provider still
+            // calls cudaStreamSynchronize inside the capture (CUDA error 900,
+            // cuda_execution_provider.cc:477) and aborts under sustained load,
+            // and the measured gain was ~0 on an RTX 3090. CUDA graphs for this
+            // engine need a native-TensorRT runtime, not the EP.
             // Reuse kernel auto-tuning results across builds (4-14x faster (re)builds)
             // and search harder for fast tactics (level 5 = max; only lengthens the
             // one-time build, which the cache then amortizes).
