@@ -45,7 +45,8 @@ RfDetrDetector::RfDetrDetector(const DetectorCfg& cfg)
       backend_(make_backend(cfg.backend, cfg.model_path, cfg.device,
                             cfg.precision, cfg.int8_calib,
                             TrtProfile{"input", 3, cfg.input_size, cfg.input_size,
-                                       kMinBatch, kOptBatch, kMaxBatch})) {}
+                                       kMinBatch, kOptBatch, kMaxBatch,
+                                       /*nhwc=*/cfg.input_u8})) {}
 
 void RfDetrDetector::preprocess_into(const cv::Mat& frame, float* dst) const {
     const int S = cfg_.input_size;
@@ -95,24 +96,9 @@ std::vector<std::vector<Detection>> RfDetrDetector::detect_batch(const std::vect
         return results;
     }
 
-    // One [N,3,S,S] blob; preprocess each image in parallel (dominant cost for
-    // many SAHI tiles). Each tile is stretch-resized to S×S, so variable tile
-    // sizes pack into a uniform batch.
-    const int S = cfg_.input_size;
-    const int sizes[4] = {N, 3, S, S};
-    // Reuse the input buffer across calls: create() only reallocates when the
-    // shape changes (e.g. ROI batch=1 vs SAHI batch=8), so the high-frequency
-    // ROI path stops malloc/free-ing a multi-MB blob every frame.
-    blob_.create(4, sizes, CV_32F);
-    cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& rng) {
-        for (int n = rng.start; n < rng.end; ++n) {
-            preprocess_into(imgs[n], blob_.ptr<float>() + static_cast<size_t>(n) * 3 * S * S);
-        }
-    });
-
     std::vector<cv::Mat> outs;
     try {
-        outs = backend_->run_multi(blob_);
+        outs = infer_batch(imgs);
     } catch (const std::exception&) {
         if (N == 1) throw;                                   // genuine failure
         for (int n = 0; n < N; ++n) results[n] = detect(imgs[n]);  // fixed-batch / OOM fallback
@@ -149,6 +135,84 @@ std::vector<std::vector<Detection>> RfDetrDetector::detect_batch(const std::vect
                                 Q, C, imgs[n].cols, imgs[n].rows);
     }
     return results;
+}
+
+std::vector<cv::Mat> RfDetrDetector::infer_batch(const std::vector<cv::Mat>& imgs) {
+    const int N = static_cast<int>(imgs.size());
+    const int S = cfg_.input_size;
+    const size_t per = static_cast<size_t>(3) * S * S;
+
+    if (cfg_.input_u8) {
+        // In-graph preprocessing model (uint8 NHWC BGR, scripts/make_uint8_onnx.py):
+        // "preprocess" is just a stretch-resize into the staging buffer — no
+        // cvtColor, no fp32 normalize (both live in the ONNX graph, bit-exact
+        // vs the folded CPU math) — and the upload is 4x smaller.
+        uint8_t* pinned = backend_->pinned_input_u8(static_cast<size_t>(kMaxBatch) * per);
+        uint8_t* dst = pinned;
+        if (!dst) {
+            const int sizes[4] = {N, S, S, 3};
+            blob_.create(4, sizes, CV_8U);
+            dst = blob_.ptr<uint8_t>();
+        }
+        cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& rng) {
+            for (int n = rng.start; n < rng.end; ++n) {
+                cv::Mat slot(S, S, CV_8UC3, dst + static_cast<size_t>(n) * per);
+                if (imgs[n].cols == S && imgs[n].rows == S) {
+                    imgs[n].copyTo(slot);   // exact-size tile: plain copy
+                } else {
+                    cv::resize(imgs[n], slot, slot.size(), 0, 0, cv::INTER_LINEAR);
+                }
+            }
+        });
+        if (pinned) {
+            return backend_->run_pinned_u8({static_cast<int64_t>(N), S, S, 3});
+        }
+        return backend_->run_multi(blob_);
+    }
+
+    // Ask for the full engine-max slab up front so the pinned buffer never
+    // regrows (pinned alloc/free is expensive) and the batch=1 ROI path reuses
+    // the same slab the batch=8 SAHI path staged into. One [N,3,S,S] batch;
+    // preprocess each image in parallel (dominant host cost for SAHI tiles).
+    float* pinned = backend_->pinned_input(static_cast<size_t>(kMaxBatch) * per);
+    float* dst = pinned;
+    if (!dst) {
+        // Pageable fallback (CPU-only backend). Reuse the blob across calls:
+        // create() only reallocates when the shape changes, so the
+        // high-frequency ROI path stops malloc/free-ing a multi-MB blob.
+        const int sizes[4] = {N, 3, S, S};
+        blob_.create(4, sizes, CV_32F);
+        dst = blob_.ptr<float>();
+    }
+    cv::parallel_for_(cv::Range(0, N), [&](const cv::Range& rng) {
+        for (int n = rng.start; n < rng.end; ++n) {
+            preprocess_into(imgs[n], dst + static_cast<size_t>(n) * per);
+        }
+    });
+    if (pinned) {
+        return backend_->run_pinned({static_cast<int64_t>(N), 3, S, S});
+    }
+    return backend_->run_multi(blob_);
+}
+
+std::pair<cv::Mat, cv::Mat> RfDetrDetector::run_raw(const std::vector<cv::Mat>& imgs) {
+    const int N = static_cast<int>(imgs.size());
+    CV_Assert(N >= 1 && N <= kMaxBatch);
+    auto outs = infer_batch(imgs);
+    if (outs.size() < 2) {
+        throw std::runtime_error("RfDetrDetector::run_raw: expected 2 outputs, got "
+                                 + std::to_string(outs.size()));
+    }
+    int bi = -1, li = -1;
+    for (int i = 0; i < static_cast<int>(outs.size()); ++i) {
+        if (outs[i].dims < 3) continue;
+        if (outs[i].size[outs[i].dims - 1] == 4) bi = i;
+        else                                     li = i;
+    }
+    if (bi < 0 || li < 0) {
+        throw std::runtime_error("RfDetrDetector::run_raw: could not identify boxes/logits");
+    }
+    return {std::move(outs[bi]), std::move(outs[li])};
 }
 
 std::vector<Detection> RfDetrDetector::decode_one(const float* bptr, const float* lptr,

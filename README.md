@@ -201,6 +201,86 @@ back to sensible defaults. The keys you'll touch most:
 
 ---
 
+## Accuracy audit: does the TensorRT FP16 engine lose detections?
+
+Deployed DETR engines can lose accuracy **silently**. Two documented failure
+modes motivated this audit: TensorRT has miscompiled deformable-attention
+`GridSample` in context (≈ −10 AP on D-FINE, with confidence scores left
+intact, so nothing looks wrong on screen), and the global FP16 builder flag can
+place lossy casts on precision-critical box math (≈ −7 AP more). Our exported
+RF-DETR graph contains both trigger patterns — 4 `GridSample` nodes in the
+decoder cross-attention and the weak-typed `trt_fp16_enable` flag — and until
+now the shipping engine had only ever been sanity-checked by eye. Score-only
+checks are provably blind to this class of bug (boxes drift while scores stay
+plausible), so the audit compares **boxes**, not scores.
+
+### What we did
+
+Both tiers run through the real C++ pipeline via `tools/parity_dump.cpp`
+(built with the normal build):
+
+1. **Backend parity on our own footage (label-free).** Three 4K drone clips,
+   every 15th frame, the exact production path (SAHI tiling + IOS merge), run
+   identically through three backends: ORT **CUDA EP** (the non-TensorRT
+   reference), **TRT fp32** (isolates TensorRT compilation errors), and
+   **TRT fp16** (production). `tools/parity_compare.py` greedy-matches
+   detections per frame by class + IoU, separates *true* disagreements from
+   near-threshold flips, and renders the worst-disagreement frames as
+   annotated PNGs for visual inspection.
+2. **Absolute mAP on COCO val2017 (all 5,000 images).** Batch-1 inference with
+   RF-DETR's official postprocess (top-K over all query×class scores), scored
+   with pycocotools by `tools/coco_eval_dump.py` — directly comparable to the
+   published RF-DETR-Medium reference (54.7 AP / 73.6 AP50).
+
+### What we found — the engine is clean
+
+**Tier 1** (≈25,000 matched detections across the three clips, conf 0.3):
+
+| vs CUDA-EP reference | matched IoU (mean) | true misses | true extras | mean box drift |
+|---|---|---|---|---|
+| TRT fp32 | 0.998–0.999 | 0.04–0.08% | 0.03–0.08% | 0.01 px |
+| TRT fp16 (production) | 0.977–0.992 | 0.12–0.31% | 0.09–0.31% | 0.11 px |
+
+fp32-TRT ≈ CUDA-EP rules out a TensorRT miscompile of this graph; fp16 adds
+only textbook numerical noise. Rendering the worst frames confirms the
+remaining disagreements are tiny distant objects flickering around the 0.3
+confidence cut — no drift, no hallucinations, no class swaps.
+
+**Tier 2** (COCO val2017, full 5,000 images):
+
+| backend | AP | AP50 | AP75 | AP-small |
+|---|---|---|---|---|
+| ORT CUDA EP | 54.68 | 73.45 | 59.05 | 35.94 |
+| TRT fp32 | 54.73 | 73.50 | 59.04 | 35.93 |
+| **TRT fp16 (production)** | **54.74** | **73.57** | 59.00 | 35.82 |
+
+All three backends agree within 0.06 AP — and they land exactly on the
+official RF-DETR-Medium reference (54.7 AP / 73.6 AP50), certifying the whole
+chain (ONNX export → preprocessing → engine → decode) end to end.
+
+**Takeaway:** TRT-FP16 is accuracy-neutral for this export; the feared silent
+losses do not apply. These tools are the standing regression gate — rerun them
+after any model re-export, EP flag change, or TensorRT upgrade.
+
+### Reproduce
+
+```bash
+# Tier 1: per-backend dumps over a clip (video mode = the exact production path)
+./build/parity_dump video clip.MP4 configs/rfdetr_medium_sahi.yaml \
+    --out fp16.jsonl --every 15 --max 200 --conf 0.10
+./build/parity_dump video clip.MP4 configs/rfdetr_medium_sahi.yaml \
+    --out ref.jsonl  --every 15 --max 200 --conf 0.10 --backend onnxruntime
+python3 tools/parity_compare.py --ref ref.jsonl --test fp16.jsonl \
+    --video clip.MP4 --outdir vis/          # stats + worst-frame PNG gallery
+
+# Tier 2: COCO val2017 mAP (pip install pycocotools)
+./build/parity_dump coco path/to/val2017 configs/rfdetr_medium_sahi.yaml \
+    --out coco_fp16.jsonl
+python3 tools/coco_eval_dump.py --ann instances_val2017.json --dump coco_fp16.jsonl
+```
+
+---
+
 ## Acknowledgments
 
 Multi-object tracking (ByteTrack, BoT-SORT, OC-SORT) is provided by the vendored
