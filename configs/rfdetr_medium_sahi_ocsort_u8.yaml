@@ -21,6 +21,7 @@ detector:
   device:     cuda
   input_size: 576
   input_u8:   true            # in-graph preprocessing: feed raw uint8 NHWC (scripts/make_uint8_onnx.py)
+  b1_session: true            # dedicated fixed-batch-1 TRT session for the locked-ROI path
   conf:       0.3             # lowered from 0.5: feeds the low-conf association so a
                              # flickering target keeps its track id -> far fewer LOSTs.
   nms_iou:    0.5             # cross-tile merge NMS (TiledDetector)

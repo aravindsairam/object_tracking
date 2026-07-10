@@ -46,7 +46,16 @@ RfDetrDetector::RfDetrDetector(const DetectorCfg& cfg)
                             cfg.precision, cfg.int8_calib,
                             TrtProfile{"input", 3, cfg.input_size, cfg.input_size,
                                        kMinBatch, kOptBatch, kMaxBatch,
-                                       /*nhwc=*/cfg.input_u8})) {}
+                                       /*nhwc=*/cfg.input_u8})) {
+    // Optional second session pinned to batch 1 (detector.b1_session): builds a
+    // batch-specialized engine for the locked-ROI path (own cache prefix).
+    if (cfg.b1_session && (cfg.backend == "tensorrt" || cfg.backend == "trt")) {
+        backend_b1_ = make_backend(cfg.backend, cfg.model_path, cfg.device,
+                                   cfg.precision, cfg.int8_calib,
+                                   TrtProfile{"input", 3, cfg.input_size, cfg.input_size,
+                                              1, 1, 1, /*nhwc=*/cfg.input_u8});
+    }
+}
 
 void RfDetrDetector::preprocess_into(const cv::Mat& frame, float* dst) const {
     const int S = cfg_.input_size;
@@ -142,12 +151,19 @@ std::vector<cv::Mat> RfDetrDetector::infer_batch(const std::vector<cv::Mat>& img
     const int S = cfg_.input_size;
     const size_t per = static_cast<size_t>(3) * S * S;
 
+    // Route batch-1 calls (locked-ROI crops) to the dedicated fixed-shape
+    // session when configured; everything else uses the dynamic-batch session.
+    // Each backend owns its own staging slab, sized to its worst-case batch.
+    const bool use_b1 = (N == 1 && backend_b1_);
+    InferenceBackend* be = use_b1 ? backend_b1_.get() : backend_.get();
+    const size_t slab_batch = use_b1 ? 1 : static_cast<size_t>(kMaxBatch);
+
     if (cfg_.input_u8) {
         // In-graph preprocessing model (uint8 NHWC BGR, scripts/make_uint8_onnx.py):
         // "preprocess" is just a stretch-resize into the staging buffer — no
         // cvtColor, no fp32 normalize (both live in the ONNX graph, bit-exact
         // vs the folded CPU math) — and the upload is 4x smaller.
-        uint8_t* pinned = backend_->pinned_input_u8(static_cast<size_t>(kMaxBatch) * per);
+        uint8_t* pinned = be->pinned_input_u8(slab_batch * per);
         uint8_t* dst = pinned;
         if (!dst) {
             const int sizes[4] = {N, S, S, 3};
@@ -165,16 +181,16 @@ std::vector<cv::Mat> RfDetrDetector::infer_batch(const std::vector<cv::Mat>& img
             }
         });
         if (pinned) {
-            return backend_->run_pinned_u8({static_cast<int64_t>(N), S, S, 3});
+            return be->run_pinned_u8({static_cast<int64_t>(N), S, S, 3});
         }
-        return backend_->run_multi(blob_);
+        return be->run_multi(blob_);
     }
 
     // Ask for the full engine-max slab up front so the pinned buffer never
     // regrows (pinned alloc/free is expensive) and the batch=1 ROI path reuses
     // the same slab the batch=8 SAHI path staged into. One [N,3,S,S] batch;
     // preprocess each image in parallel (dominant host cost for SAHI tiles).
-    float* pinned = backend_->pinned_input(static_cast<size_t>(kMaxBatch) * per);
+    float* pinned = be->pinned_input(slab_batch * per);
     float* dst = pinned;
     if (!dst) {
         // Pageable fallback (CPU-only backend). Reuse the blob across calls:
@@ -190,9 +206,9 @@ std::vector<cv::Mat> RfDetrDetector::infer_batch(const std::vector<cv::Mat>& img
         }
     });
     if (pinned) {
-        return backend_->run_pinned({static_cast<int64_t>(N), 3, S, S});
+        return be->run_pinned({static_cast<int64_t>(N), 3, S, S});
     }
-    return backend_->run_multi(blob_);
+    return be->run_multi(blob_);
 }
 
 std::pair<cv::Mat, cv::Mat> RfDetrDetector::run_raw(const std::vector<cv::Mat>& imgs) {
