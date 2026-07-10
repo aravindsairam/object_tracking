@@ -4,6 +4,7 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,9 +24,24 @@ public:
                const TrtProfile& profile = {});
     cv::Mat run(const cv::Mat& blob_nchw) override;
     std::vector<cv::Mat> run_multi(const cv::Mat& blob_nchw) override;
+    // Pinned-memory IoBinding path (see InferenceBackend): available whenever a
+    // GPU EP loaded, so both the TensorRT EP and the plain CUDA EP benefit.
+    float* pinned_input(size_t float_count) override;
+    std::vector<cv::Mat> run_pinned(const std::array<int64_t, 4>& shape) override;
+    uint8_t* pinned_input_u8(size_t byte_count) override;
+    std::vector<cv::Mat> run_pinned_u8(const std::array<int64_t, 4>& shape_nhwc) override;
     std::string name() const override { return name_; }
 
 private:
+    // Copy ORT output tensors into owned cv::Mats (the Ort::Values free their
+    // buffers on return; on the pinned path the copy is pinned-host -> host,
+    // an ordinary fast memcpy).
+    static std::vector<cv::Mat> to_mats(std::vector<Ort::Value>& outs);
+    void note_run(double ms, int64_t batch);   // OT_PROFILE bookkeeping
+    void* pinned_bytes(size_t bytes);          // grow-to-high-water pinned slab
+    std::vector<cv::Mat> run_pinned_impl(const std::array<int64_t, 4>& shape,
+                                         bool u8);
+
     std::string              int8_calib_;  // kept alive for the TRT EP option
     Ort::Env                 env_;
     Ort::SessionOptions      opts_;
@@ -36,6 +52,16 @@ private:
     std::vector<std::string> output_name_store_;
     std::vector<const char*> input_names_;
     std::vector<const char*> output_names_;
+
+    // Pinned (page-locked) input staging + IoBinding. Populated after session
+    // creation when a GPU EP is active and the session exposes the CudaPinned
+    // allocator; when absent (CPU-only) pinned_input() returns nullptr and
+    // callers use the pageable run_multi() path instead.
+    std::optional<Ort::Allocator>        pinned_alloc_;
+    std::optional<Ort::IoBinding>        binding_;
+    std::optional<Ort::MemoryAllocation> pinned_in_;           // input slab
+    size_t                               pinned_in_bytes_ = 0; // capacity, bytes
+    int64_t                              bound_out_batch_ = -1; // batch outputs bound for
 
     // Inference profiling (enabled when the OT_PROFILE env var is set). Times the
     // pure session_.Run (GPU compute + H2D/D2H copies) so it can be compared

@@ -1,7 +1,9 @@
 #pragma once
 
 #include <opencv2/core.hpp>
+#include <array>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -17,6 +19,8 @@ struct TrtProfile {
     std::string input_name;            // model input tensor name (RF-DETR: "input")
     int c = 0, h = 0, w = 0;           // fixed channel + spatial dims
     int min_batch = 0, opt_batch = 0, max_batch = 0;
+    bool nhwc = false;                 // input laid out NxHxWxC (uint8 in-graph
+                                       // preprocess models) instead of NxCxHxW
     bool enabled() const {
         return !input_name.empty() && c > 0 && h > 0 && w > 0 &&
                min_batch >= 1 && opt_batch >= min_batch && max_batch >= opt_batch;
@@ -40,6 +44,25 @@ public:
     // wraps run() so single-output backends need not implement it.
     virtual std::vector<cv::Mat> run_multi(const cv::Mat& blob_nchw) {
         return {run(blob_nchw)};
+    }
+
+    // Pinned-memory fast path. pinned_input() returns a page-locked host buffer
+    // holding >= float_count floats (nullptr when the backend has no pinned
+    // allocator, e.g. CPU-only): the caller preprocesses directly into it and
+    // calls run_pinned() with the NCHW shape of what it wrote. The H2D upload
+    // then rides the fast DMA path instead of a pageable-memory copy, and the
+    // outputs come back through pinned buffers too (IoBinding). The buffer is
+    // owned by the backend and stays valid until the next pinned_input() call.
+    virtual float* pinned_input(size_t /*float_count*/) { return nullptr; }
+    virtual std::vector<cv::Mat> run_pinned(const std::array<int64_t, 4>& /*shape*/) {
+        throw std::runtime_error("run_pinned: not supported by this backend");
+    }
+    // Same pair for models with in-graph preprocessing (uint8 NHWC input, see
+    // scripts/make_uint8_onnx.py): the caller stages RAW RESIZED PIXELS and
+    // the upload is 4x smaller than the fp32 blob.
+    virtual uint8_t* pinned_input_u8(size_t /*byte_count*/) { return nullptr; }
+    virtual std::vector<cv::Mat> run_pinned_u8(const std::array<int64_t, 4>& /*shape_nhwc*/) {
+        throw std::runtime_error("run_pinned_u8: not supported by this backend");
     }
 
     virtual std::string name() const = 0;

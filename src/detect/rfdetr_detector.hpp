@@ -6,6 +6,7 @@
 #include "ot/inference_backend.hpp"
 
 #include <memory>
+#include <utility>
 
 namespace ot {
 
@@ -27,6 +28,12 @@ public:
     // per-image inference if the batched run fails (e.g. fixed-batch model / OOM).
     std::vector<std::vector<Detection>> detect_batch(const std::vector<cv::Mat>& imgs) override;
 
+    // Raw batch inference for offline eval tools (backend-parity / COCO-mAP
+    // audits): preprocess exactly like detect_batch, run the backend, and return
+    // the raw output tensors (boxes [N,Q,4] normalized cxcywh, logits [N,Q,C])
+    // with no class filtering or thresholding. N must fit one engine batch.
+    std::pair<cv::Mat, cv::Mat> run_raw(const std::vector<cv::Mat>& imgs);
+
 private:
     DetectorCfg                        cfg_;
     ClassMap                           class_map_;
@@ -40,6 +47,10 @@ private:
     // come back normalized to this stretched space, so undoing the resize is just
     // a multiply by the frame's own width/height.
     void preprocess_into(const cv::Mat& frame, float* dst) const;
+    // Preprocess N (<= engine max batch) images and run one batched inference.
+    // Prefers the backend's pinned staging buffer (fast DMA H2D + IoBinding);
+    // falls back to the reusable pageable blob_ when the backend has none.
+    std::vector<cv::Mat> infer_batch(const std::vector<cv::Mat>& imgs);
     std::vector<Detection> decode_one(const float* boxes, const float* logits,
                                       int Q, int C, int frame_w, int frame_h) const;
 };
