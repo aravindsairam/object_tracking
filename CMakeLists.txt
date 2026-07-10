@@ -174,10 +174,18 @@ set_target_properties(bench_batch_flip PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# A/B throughput bench for the inference-loop software pipeline.
+add_executable(bench_pipeline tools/bench_pipeline.cpp)
+target_link_libraries(bench_pipeline PRIVATE ot_core)
+target_link_options(bench_pipeline PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(bench_pipeline PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
 # ---- warnings on our own targets (vendored motcpp left untouched) ----------
 # -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle parity_dump test_batch_switch bench_batch_flip)
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle parity_dump test_batch_switch bench_batch_flip bench_pipeline)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endforeach()
 endif()
