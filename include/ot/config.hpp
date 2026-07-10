@@ -17,6 +17,8 @@ struct DetectorCfg {
     bool        input_u8   = false;     // model has in-graph preprocessing and takes
                                         // raw uint8 NHWC BGR pixels (rfdetr only;
                                         // export with scripts/make_uint8_onnx.py)
+    bool        b1_session = false;     // extra fixed-batch-1 TRT session for the
+                                        // locked-ROI path (own specialized engine)
     float       conf       = 0.25f;     // score threshold
     float       nms_iou    = 0.45f;     // NMS IoU (raw-head models only)
     std::string class_map  = "coco";    // coco | waldo | unidrone — which ids are people/vehicles

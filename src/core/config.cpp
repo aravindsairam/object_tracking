@@ -39,6 +39,7 @@ Config load_config(const std::string& yaml_path) {
     cfg.detector.int8_calib = get_or<std::string>(d, "int8_calib", cfg.detector.int8_calib);
     cfg.detector.input_size = get_or<int>(d, "input_size", cfg.detector.input_size);
     cfg.detector.input_u8   = get_or<bool>(d, "input_u8", cfg.detector.input_u8);
+    cfg.detector.b1_session = get_or<bool>(d, "b1_session", cfg.detector.b1_session);
     cfg.detector.conf       = get_or<float>(d, "conf", cfg.detector.conf);
     cfg.detector.nms_iou    = get_or<float>(d, "nms_iou", cfg.detector.nms_iou);
     cfg.detector.class_map  = get_or<std::string>(d, "class_map", cfg.detector.class_map);
