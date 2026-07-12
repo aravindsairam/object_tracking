@@ -66,6 +66,20 @@ const char* state_name(LockState s) {
         default:                  return "";
     }
 }
+
+// "  ~143m" / "  ~1.4km", with "(est)" marking a class-size-prior estimate.
+// Empty when there is no range this frame.
+std::string range_text(const TargetState& t) {
+    if (t.range_method == RangeMethod::None || t.range_slant_m <= 0.0f) return "";
+    char buf[48];
+    if (t.range_slant_m < 995.0f)
+        std::snprintf(buf, sizeof(buf), "  ~%.0fm", t.range_slant_m);
+    else
+        std::snprintf(buf, sizeof(buf), "  ~%.1fkm", t.range_slant_m / 1000.0f);
+    std::string s(buf);
+    if (t.range_method == RangeMethod::SizePrior) s += "(est)";
+    return s;
+}
 }  // namespace
 
 // ---- Lock reticle ---------------------------------------------------------
@@ -146,9 +160,9 @@ void LockReticle::draw(cv::Mat& frame, const TargetState& target,
 
     char buf[128];
     // Show the stable lock id (not the churning MOT id) and the voted class.
-    std::snprintf(buf, sizeof(buf), "LOCK #%d %s [%s] %.0f%%", target.lock_id,
+    std::snprintf(buf, sizeof(buf), "LOCK #%d %s [%s] %.0f%%%s", target.lock_id,
                   class_map.label(target.class_id).c_str(), state_name(target.state),
-                  target.confidence * 100.0f);
+                  target.confidence * 100.0f, range_text(target).c_str());
     draw_label(frame, target.box.to_rect(), buf, color);
 
     prev_state_ = target.state;
@@ -205,8 +219,9 @@ cv::Mat render_zoom_panel(const cv::Mat& crop, const cv::Rect& src,
         }
 
         char l1[96], l2[96];
-        std::snprintf(l1, sizeof(l1), "LOCK #%d  %s", target.lock_id,
-                      class_map.label(target.class_id).c_str());
+        std::snprintf(l1, sizeof(l1), "LOCK #%d  %s%s", target.lock_id,
+                      class_map.label(target.class_id).c_str(),
+                      range_text(target).c_str());
         std::snprintf(l2, sizeof(l2), "%s  %.0f%%  x%.1f", state_name(target.state),
                       target.confidence * 100.0f, k);
         const int ty = iy + side + 26;

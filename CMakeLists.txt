@@ -80,6 +80,8 @@ add_library(ot_core
   src/reid/histogram_embedder.cpp
   src/reid/onnx_reid_embedder.cpp
   src/output/jsonl_sink.cpp
+  src/geo/telemetry.cpp
+  src/geo/range_estimator.cpp
   src/ui/overlay.cpp
   src/ui/selector.cpp
 )
@@ -139,6 +141,14 @@ set_target_properties(test_lock_appearance PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# Logic-only unit test for SRT telemetry parsing + locked-target range estimation.
+add_executable(test_range tools/test_range.cpp)
+target_link_libraries(test_range PRIVATE ot_core)
+target_link_options(test_range PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(test_range PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
 # Logic-only unit test for the lock-reticle animation helpers (no GPU/render).
 add_executable(test_lock_reticle tools/test_lock_reticle.cpp)
 target_link_libraries(test_lock_reticle PRIVATE ot_core)
@@ -185,7 +195,7 @@ set_target_properties(bench_pipeline PROPERTIES
 # ---- warnings on our own targets (vendored motcpp left untouched) ----------
 # -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle parity_dump test_batch_switch bench_batch_flip bench_pipeline)
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle test_range parity_dump test_batch_switch bench_batch_flip bench_pipeline)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endforeach()
 endif()

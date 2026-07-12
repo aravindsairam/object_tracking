@@ -87,3 +87,21 @@ reid:
 output:
   sink: jsonl
   path: out/track.jsonl
+
+# Distance to the LOCKED target, shown on the reticle/zoom panel and logged to
+# the JSONL. Needs the DJI .SRT sidecar next to the video (auto-detected; or
+# --srt FILE). Methods, best available wins per frame:
+#   gp  — ground-plane ray intersection; needs gimbal attitude (enterprise-SRT
+#         gb_pitch, or --gimbal-pitch DEG for a clip with a known fixed pitch).
+#   est — class-size prior (typical car/person/... size vs box size); no
+#         attitude needed, ~10-15% accuracy, tagged "(est)" in the overlay.
+range:
+  enabled: true
+  smooth_window: 15          # rolling-median window over the estimate [frames]
+  # size_priors:             # override/extend the built-in typical sizes [m]
+  #   car: 4.6
+  #   truck: 8.0
+  # max_range_m: 10000       # discard implausible fixes beyond this
+  # min_depression_deg: 1.0  # gp: reject rays this close to the horizon
+  # ground_alt_offset_m: 0   # gp/est: target-ground elevation vs takeoff [m]
+  # equiv_focal_mm: 0        # set (35mm equiv) to enable est on SRT-less videos
