@@ -43,6 +43,17 @@ ot::TargetState locked_target(int class_id, float dim_px, int lock_id = 1) {
     return t;
 }
 
+// A locked target whose box BOTTOM-CENTER (the ground-contact pixel the
+// ground-plane method casts through) sits exactly at (u, v).
+ot::TargetState target_at(float u, float v, int class_id = 2, int lock_id = 1) {
+    ot::TargetState t;
+    t.state = ot::LockState::Locked;
+    t.class_id = class_id;
+    t.lock_id = lock_id;
+    t.box = {u - 20.0f, v - 16.0f, 40.0f, 16.0f};
+    return t;
+}
+
 ot::TeleFrame tele_frame(double focal_mm, double rel_alt) {
     ot::TeleFrame f;
     f.focal_len = focal_mm;
@@ -226,6 +237,107 @@ int main(int argc, char** argv) {
         const auto r3 = est.update(locked_target(2, 82.432f, 2), &tf);
         check("reset clears the window", near(r3.slant_m, 500.0, 0.05),
               std::to_string(r3.slant_m));
+    }
+
+    std::printf("== RangeEstimator: ground-plane method ==\n");
+    {
+        const ot::ClassMap cmap = ot::ClassMap::preset("coco");
+        ot::RangeCfg cfg;
+        const ot::TeleFrame tf = tele_frame(168.0, 100.0);   // 100m AGL
+
+        // Nadir: pitch -90, ray through the image center -> slant = altitude,
+        // ground = 0 (the target is directly below the drone).
+        ot::RangeEstimator nadir(cfg, 1920, 1080, cmap);
+        nadir.set_static_pitch(-90.0f);
+        const auto rn = nadir.update(target_at(960.0f, 540.0f), &tf);
+        check("nadir method is gp", rn.method == ot::RangeMethod::GroundPlane);
+        check("nadir slant = altitude", near(rn.slant_m, 100.0, 0.01),
+              std::to_string(rn.slant_m));
+        check("nadir ground ~0", rn.ground_m >= 0.0f && rn.ground_m < 0.1f,
+              std::to_string(rn.ground_m));
+
+        // 45 deg depression, center ray: slant = h/sin45 = 141.42, ground = 100.
+        ot::RangeEstimator o45(cfg, 1920, 1080, cmap);
+        o45.set_static_pitch(-45.0f);
+        const auto r45 = o45.update(target_at(960.0f, 540.0f), &tf);
+        check("45deg slant = h*sqrt(2)", near(r45.slant_m, 141.4214, 0.01),
+              std::to_string(r45.slant_m));
+        check("45deg ground = h", near(r45.ground_m, 100.0, 0.01),
+              std::to_string(r45.ground_m));
+
+        // Pixel offset: a point 15deg below the optical axis at pitch -45 sits
+        // at 60deg depression -> slant = h/sin60, ground = h/tan60. The pixel
+        // is v = cy + f_px*tan(15deg) with f_px = 168/36*1920 = 8960.
+        const float v_off = 540.0f + 8960.0f * std::tan(15.0 * M_PI / 180.0);
+        ot::RangeEstimator o60(cfg, 1920, 1080, cmap);
+        o60.set_static_pitch(-45.0f);
+        const auto r60 = o60.update(target_at(960.0f, v_off), &tf);
+        check("pixel offset adds to depression",
+              near(r60.slant_m, 100.0 / std::sin(60.0 * M_PI / 180.0), 0.05) &&
+              near(r60.ground_m, 100.0 / std::tan(60.0 * M_PI / 180.0), 0.05),
+              std::to_string(r60.slant_m) + " / " + std::to_string(r60.ground_m));
+
+        // SRT gb_* attitude drives gp without any static pitch...
+        ot::TeleFrame tf_att = tf;
+        tf_att.has_attitude = true;
+        tf_att.gb_pitch = -45.0;
+        ot::RangeEstimator srt_att(cfg, 1920, 1080, cmap);
+        const auto ra = srt_att.update(target_at(960.0f, 540.0f), &tf_att);
+        check("SRT attitude -> gp", ra.method == ot::RangeMethod::GroundPlane &&
+                                     near(ra.slant_m, 141.4214, 0.01));
+        // ...and roll about the optical axis leaves the center ray unchanged.
+        ot::TeleFrame tf_roll = tf_att;
+        tf_roll.gb_roll = 2.0;
+        ot::RangeEstimator rolled(cfg, 1920, 1080, cmap);
+        const auto rr = rolled.update(target_at(960.0f, 540.0f), &tf_roll);
+        check("roll leaves the center ray unchanged", near(rr.slant_m, 141.4214, 0.01));
+
+        // --gimbal-pitch overrides the SRT attitude.
+        ot::TeleFrame tf_bad = tf;
+        tf_bad.has_attitude = true;
+        tf_bad.gb_pitch = -10.0;
+        ot::RangeEstimator prefer_static(cfg, 1920, 1080, cmap);
+        prefer_static.set_static_pitch(-45.0f);
+        const auto rp = prefer_static.update(target_at(960.0f, 540.0f), &tf_bad);
+        check("static pitch beats SRT attitude", near(rp.slant_m, 141.4214, 0.01),
+              std::to_string(rp.slant_m));
+
+        // Guards fall through to the size prior (car box -> est, not gp):
+        // near-horizon ray (pitch -0.5deg < min_depression 1.0)...
+        ot::RangeEstimator shallow(cfg, 1920, 1080, cmap);
+        shallow.set_static_pitch(-0.5f);
+        const auto rs = shallow.update(locked_target(2, 137.3867f), &tf);
+        check("near-horizon falls back to est", rs.method == ot::RangeMethod::SizePrior);
+        // ...ray above the horizon...
+        ot::RangeEstimator up(cfg, 1920, 1080, cmap);
+        up.set_static_pitch(10.0f);
+        check("above horizon falls back to est",
+              up.update(locked_target(2, 137.3867f), &tf).method ==
+                  ot::RangeMethod::SizePrior);
+        // ...and no usable camera height (rel_alt 0).
+        const ot::TeleFrame tf_low = tele_frame(168.0, 0.0);
+        ot::RangeEstimator noalt(cfg, 1920, 1080, cmap);
+        noalt.set_static_pitch(-45.0f);
+        check("no altitude falls back to est",
+              noalt.update(locked_target(2, 137.3867f), &tf_low).method ==
+                  ot::RangeMethod::SizePrior);
+
+        // gp beats the size prior when both are available.
+        ot::RangeEstimator both(cfg, 1920, 1080, cmap);
+        both.set_static_pitch(-45.0f);
+        check("gp wins over est",
+              both.update(target_at(960.0f, 540.0f, /*car*/ 2), &tf).method ==
+                  ot::RangeMethod::GroundPlane);
+
+        // Method change (est -> gp via appearing SRT attitude) resets the
+        // median window, so the first gp value stands alone.
+        ot::RangeEstimator sw(cfg, 1920, 1080, cmap);
+        sw.update(locked_target(2, 137.3867f), &tf);       // est ~300m
+        sw.update(locked_target(2, 137.3867f), &tf);       // est ~300m
+        const auto rsw = sw.update(target_at(960.0f, 540.0f), &tf_att);  // gp 141.4m
+        check("method switch resets the window",
+              rsw.method == ot::RangeMethod::GroundPlane && near(rsw.slant_m, 141.4214, 0.01),
+              std::to_string(rsw.slant_m));
     }
 
     if (argc > 1) {
