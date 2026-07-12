@@ -101,6 +101,18 @@ Config load_config(const std::string& yaml_path) {
     cfg.output.sink = get_or<std::string>(o, "sink", cfg.output.sink);
     cfg.output.path = get_or<std::string>(o, "path", cfg.output.path);
 
+    const YAML::Node rg = root["range"];
+    cfg.range.enabled             = get_or<bool>(rg, "enabled", cfg.range.enabled);
+    cfg.range.smooth_window       = get_or<int>(rg, "smooth_window", cfg.range.smooth_window);
+    cfg.range.max_range_m         = get_or<float>(rg, "max_range_m", cfg.range.max_range_m);
+    cfg.range.min_depression_deg  = get_or<float>(rg, "min_depression_deg", cfg.range.min_depression_deg);
+    cfg.range.ground_alt_offset_m = get_or<float>(rg, "ground_alt_offset_m", cfg.range.ground_alt_offset_m);
+    cfg.range.equiv_focal_mm      = get_or<float>(rg, "equiv_focal_mm", cfg.range.equiv_focal_mm);
+    if (rg && rg["size_priors"]) {  // merged over the defaults, not replacing them
+        for (const auto& kv : rg["size_priors"])
+            cfg.range.size_priors[kv.first.as<std::string>()] = kv.second.as<float>();
+    }
+
     cfg.work_height = get_or<int>(root["input"], "height", cfg.work_height);
     cfg.decoder     = get_or<std::string>(root["input"], "decoder", cfg.decoder);
 
