@@ -188,6 +188,8 @@ int main(int argc, char** argv) {
             "  --zoom         show a magnified side panel of the locked target\n"
             "  --zoom-width N width of the zoom side panel in px (default: 360)\n"
             "  --srt FILE     DJI SRT telemetry sidecar (default: auto-detect next to the video)\n"
+            "  --gimbal-pitch DEG  fixed gimbal pitch for ground-plane ranging (0=level, -90=nadir;\n"
+            "                 overrides SRT attitude; for clips with a known, held pitch)\n"
             "  keys:  click=lock  r=reset  space=pause  s=screenshot  q/ESC=quit\n",
             argv[0]);
         return 2;
@@ -205,6 +207,8 @@ int main(int argc, char** argv) {
     bool zoom = false;             // show a magnified side panel of the locked target
     int  zoom_w = 360;             // zoom side-panel width in px
     std::string srt_override;      // --srt FILE: telemetry sidecar (else auto-detect)
+    bool   have_gimbal_pitch = false;
+    double gimbal_pitch = 0.0;     // --gimbal-pitch DEG: fixed attitude for ranging
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--height" && i + 1 < argc)      target_height = std::stoi(argv[++i]);
@@ -218,6 +222,10 @@ int main(int argc, char** argv) {
         else if (a == "--zoom")                   zoom = true;
         else if (a == "--zoom-width" && i + 1 < argc) zoom_w = std::max(120, std::stoi(argv[++i]));
         else if (a == "--srt" && i + 1 < argc)    srt_override = argv[++i];
+        else if (a == "--gimbal-pitch" && i + 1 < argc) {
+            gimbal_pitch = std::stod(argv[++i]);
+            have_gimbal_pitch = true;
+        }
         else if (ends_with(a, ".yaml") || ends_with(a, ".yml")) config_path = a;
     }
     // Enable the backend's inference timer (read in the OrtBackend ctor) before
@@ -300,6 +308,11 @@ int main(int argc, char** argv) {
         // Distance to the locked target, from telemetry + class-size priors.
         // Lives on the inference thread only (constructed here, used in its tail).
         ot::RangeEstimator ranger(cfg.range, W, H, class_map);
+        if (have_gimbal_pitch) {
+            ranger.set_static_pitch(static_cast<float>(gimbal_pitch));
+            std::printf("[run] range: fixed gimbal pitch %.1f deg (ground-plane method)\n",
+                        gimbal_pitch);
+        }
 
         // --out FILE forces a jsonl sink to that path (overrides config), so each
         // tracker config can dump to its own file for an objective A/B comparison.
