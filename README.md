@@ -6,9 +6,10 @@ survives occlusion, camera motion, and similar-looking objects nearby, and it
 tells you honestly when it has lost the target instead of silently drifting onto
 the wrong thing.
 
-It runs in real time on NVIDIA RTX GPUs and is designed to move to a Jetson
-later. It has **no dependency on drone telemetry**. The output is an on-screen
-overlay plus a structured per-frame record on disk.
+It runs in real time on NVIDIA RTX GPUs. Drone telemetry is **optional**: with
+no telemetry everything works as-is, and when a DJI `.SRT` sidecar sits next to
+the video it additionally estimates the **distance to the locked target**. The
+output is an on-screen overlay plus a structured per-frame record on disk.
 
 ---
 
@@ -78,6 +79,46 @@ Two axes, both set in YAML and swappable without recompiling: the **model
 family** (`yolo` / `waldo` / `unidrone` / `rfdetr`) and the **backend**
 (`onnxruntime` or `tensorrt`). A fine-tuned model exported to a known family is
 a pure config change.
+
+---
+
+## Distance to the locked target (DJI telemetry)
+
+If the video came from a DJI drone, keep the flight's `.SRT` subtitle file next
+to the video (auto-detected; or pass `--srt FILE`). A second HUD line then shows
+the drone's own GPS / altitude / focal length, and while a target is locked the
+reticle, zoom panel, and JSONL also carry an approximate **distance to it**.
+
+A single camera cannot measure range without one extra constraint, so the
+estimator runs an if/else per frame and uses the best constraint available:
+
+| Overlay tag | Technique | Needs |
+|---|---|---|
+| `~143m` | **Ground-plane ray intersection** — cast the pixel ray through the box's bottom-center (the ground contact point), rotate it by the gimbal attitude, intersect flat ground: `slant = altitude / sin(depression)`. No assumption about the object itself. | Gimbal pitch: `--gimbal-pitch DEG` (fixed, 0 = level / -90 = nadir), or per-frame `gb_pitch`/`gb_roll` parsed automatically from enterprise-DJI SRTs (M30/M300/M350). |
+| `~143m(est)` | **Class-size prior** — `slant = f_px × typical_size(class) / box_px`, with typical longest dimensions per class (car ≈ 4.6 m, person ≈ 1.7 m, …; editable under `range.size_priors`). | Nothing beyond the SRT. This is the fallback when no attitude exists — consumer Mavic Fly-app SRTs carry **no** gimbal fields. |
+
+Details that make it behave:
+
+- **Zoom-proof intrinsics.** `f_px` comes from the SRT's *per-frame*
+  35 mm-equivalent `focal_len`, so optical/digital zoom ramps mid-clip are
+  handled; all math runs at the working resolution (`f_px` scales with width).
+- **Smoothing & honesty.** The output is a rolling median
+  (`range.smooth_window` frames) that resets on a new lock and on a method
+  change; near-horizon rays (where `h/tan` blows up), ascending rays, and fixes
+  past `range.max_range_m` fall through instead of showing wild numbers, and
+  nothing is shown when no method applies. LOST targets get no estimate.
+- **Accuracy.** `est` is prior-dominated (~±10–15 %). Ground-plane is limited
+  by pitch accuracy and by the barometric `rel_alt` being relative to the
+  takeoff point — set `range.ground_alt_offset_m` when the target's ground
+  differs from the launch elevation.
+- **No SRT at all?** Set `range.equiv_focal_mm` (35 mm-equivalent) in the config
+  to enable the size-prior method on any footage.
+- JSONL rows gain `range_slant_m`, `range_ground_m`, and
+  `range_method` (`"gp"` / `"est"`).
+
+Per-frame attitude from PX4 telemetry (ulog → CSV, live MAVLink/ROS2) is the
+planned next source and slots into the same precedence chain.
+Verify the math without a GPU: `./build/test_range [flight.SRT]`.
 
 ---
 
@@ -173,6 +214,8 @@ The common ones (run with no args for the full list):
 | `--record FILE` | Write the annotated video to FILE (e.g. `out.mp4`). |
 | `--autolock` | Automatically lock the largest/most-central track, for headless runs. |
 | `--zoom` | Show a magnified side panel of the locked target. |
+| `--srt FILE` | DJI SRT telemetry sidecar (default: auto-detect `<video>.SRT`). |
+| `--gimbal-pitch DEG` | Fixed gimbal pitch for ground-plane ranging (0 = level, -90 = nadir); overrides SRT attitude. |
 
 ---
 
@@ -198,6 +241,10 @@ back to sensible defaults. The keys you'll touch most:
 - **`reid`**: `kind` (`histogram` or neural `onnx` OSNet) and its `model_path`.
 - **`input` / `output`**: `input.height` (working resolution), `output.sink`
   (`none`/`jsonl`) and `output.path` for the per-frame JSONL record.
+- **`range`**: distance-to-target estimation — `enabled`, `size_priors`
+  (typical class sizes in meters), `smooth_window`, `max_range_m`,
+  `min_depression_deg`, `ground_alt_offset_m`, `equiv_focal_mm` (for videos
+  without an SRT).
 
 ---
 
