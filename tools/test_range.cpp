@@ -1,8 +1,10 @@
 // Logic-only tests for the telemetry + range-estimation stack (no video/GPU):
 // SRT parsing (Mavic and enterprise gb_* variants, CRLF, zoom ramp), sidecar
-// detection, and per-frame lookup clamping. Optionally parses a real SRT.
+// detection, per-frame lookup clamping, and the RangeEstimator method chain
+// (size-prior math, smoothing, resets, guards). Optionally parses a real SRT.
 //
 //   ./build/test_range [path/to/DJI_xxxx.SRT]
+#include "ot/range_estimator.hpp"
 #include "ot/telemetry.hpp"
 
 #include <cmath>
@@ -29,6 +31,24 @@ std::string write_temp(const char* name, const std::string& content) {
     std::ofstream out(path, std::ios::trunc | std::ios::binary);
     out << content;
     return path.string();
+}
+
+// A locked target of the given class whose box's longest dimension is dim_px.
+ot::TargetState locked_target(int class_id, float dim_px, int lock_id = 1) {
+    ot::TargetState t;
+    t.state = ot::LockState::Locked;
+    t.class_id = class_id;
+    t.lock_id = lock_id;
+    t.box = {100.0f, 100.0f, dim_px, dim_px * 0.4f};
+    return t;
+}
+
+ot::TeleFrame tele_frame(double focal_mm, double rel_alt) {
+    ot::TeleFrame f;
+    f.focal_len = focal_mm;
+    f.has_focal = true;
+    f.rel_alt = rel_alt;
+    return f;
 }
 }  // namespace
 
@@ -114,6 +134,98 @@ int main(int argc, char** argv) {
               ot::find_srt_sidecar(vid));
         check("rtsp url -> no sidecar",
               ot::find_srt_sidecar("rtsp://cam/stream").empty());
+    }
+
+    std::printf("== RangeEstimator: size-prior method ==\n");
+    {
+        const ot::ClassMap cmap = ot::ClassMap::preset("coco");  // car = 2, person = 0
+        ot::RangeCfg cfg;                                        // defaults: car 4.6m
+        ot::RangeEstimator est(cfg, 1920, 1080, cmap);
+
+        // f_px = 168/36*1920 = 8960; a 4.6m car spanning 137.3867px sits at 300m.
+        const ot::TeleFrame tf = tele_frame(168.0, 71.0);
+        const auto r = est.update(locked_target(2, 137.3867f), &tf);
+        check("method is size-prior", r.method == ot::RangeMethod::SizePrior);
+        check("slant ~300m", near(r.slant_m, 300.0, 0.01),
+              std::to_string(r.slant_m));
+        // Flat ground at 71m AGL: ground = sqrt(300^2 - 71^2) = 291.48m.
+        check("ground ~291.5m", near(r.ground_m, 291.477, 0.01),
+              std::to_string(r.ground_m));
+
+        // Class without a prior (airplane isn't a kept class) -> no estimate.
+        ot::RangeEstimator est2(cfg, 1920, 1080, cmap);
+        check("no prior class -> none",
+              est2.update(locked_target(4, 100.0f), &tf).method == ot::RangeMethod::None);
+
+        // No focal from telemetry and no override -> no estimate.
+        ot::TeleFrame no_focal;
+        no_focal.rel_alt = 71.0;
+        ot::RangeEstimator est3(cfg, 1920, 1080, cmap);
+        check("no focal -> none",
+              est3.update(locked_target(2, 100.0f), &no_focal).method == ot::RangeMethod::None);
+        check("no telemetry -> none",
+              est3.update(locked_target(2, 100.0f), nullptr).method == ot::RangeMethod::None);
+
+        // equiv_focal_mm override enables the size branch without any SRT:
+        // f_px = 70/36*1920 = 3733.33; a 1.7m person at 21.156px sits at 300m.
+        ot::RangeCfg cfg_f = cfg;
+        cfg_f.equiv_focal_mm = 70.0f;
+        ot::RangeEstimator est4(cfg_f, 1920, 1080, cmap);
+        const auto rf = est4.update(locked_target(0, 21.1556f), nullptr);
+        check("focal override works without SRT",
+              rf.method == ot::RangeMethod::SizePrior && near(rf.slant_m, 300.0, 0.05),
+              std::to_string(rf.slant_m));
+        check("ground unknown without altitude", rf.ground_m < 0.0f);
+
+        // Implausibly far (2px box -> 20.6km) exceeds max_range_m -> rejected.
+        ot::RangeEstimator est5(cfg, 1920, 1080, cmap);
+        check("max range guard",
+              est5.update(locked_target(2, 2.0f), &tf).method == ot::RangeMethod::None);
+
+        // Lost target: the box is a stale prediction -> no estimate.
+        ot::TargetState lost = locked_target(2, 137.3867f);
+        lost.state = ot::LockState::Lost;
+        ot::RangeEstimator est6(cfg, 1920, 1080, cmap);
+        check("lost -> none", est6.update(lost, &tf).method == ot::RangeMethod::None);
+        ot::TargetState coasting = locked_target(2, 137.3867f);
+        coasting.state = ot::LockState::Coasting;
+        check("coasting still estimates",
+              est6.update(coasting, &tf).method == ot::RangeMethod::SizePrior);
+
+        // range.enabled: false -> never estimates.
+        ot::RangeCfg off = cfg;
+        off.enabled = false;
+        ot::RangeEstimator est7(off, 1920, 1080, cmap);
+        check("disabled -> none",
+              est7.update(locked_target(2, 137.3867f), &tf).method == ot::RangeMethod::None);
+    }
+
+    std::printf("== RangeEstimator: smoothing & resets ==\n");
+    {
+        const ot::ClassMap cmap = ot::ClassMap::preset("coco");
+        ot::RangeCfg cfg;
+        ot::RangeEstimator est(cfg, 1920, 1080, cmap);
+        const ot::TeleFrame tf = tele_frame(168.0, 71.0);
+
+        // Slants 100 / 500 / 100 (dims 412.16 / 82.432 / 412.16 px): the rolling
+        // median must reject the one-frame 500m spike.
+        est.update(locked_target(2, 412.16f), &tf);
+        est.update(locked_target(2, 82.432f), &tf);
+        const auto r = est.update(locked_target(2, 412.16f), &tf);
+        check("median rejects the spike", near(r.slant_m, 100.0, 0.01),
+              std::to_string(r.slant_m));
+
+        // A new lock id starts a fresh window: the first estimate is its own.
+        const auto r2 = est.update(locked_target(2, 82.432f, /*lock_id=*/2), &tf);
+        check("new lock resets the window", near(r2.slant_m, 500.0, 0.05),
+              std::to_string(r2.slant_m));
+
+        // Explicit reset (r key / loop restart) also clears the window.
+        est.update(locked_target(2, 412.16f, 2), &tf);
+        est.reset();
+        const auto r3 = est.update(locked_target(2, 82.432f, 2), &tf);
+        check("reset clears the window", near(r3.slant_m, 500.0, 0.05),
+              std::to_string(r3.slant_m));
     }
 
     if (argc > 1) {

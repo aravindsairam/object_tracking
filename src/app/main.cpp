@@ -6,6 +6,7 @@
 #include "ot/mot_tracker.hpp"
 #include "ot/one_euro.hpp"
 #include "ot/overlay.hpp"
+#include "ot/range_estimator.hpp"
 #include "ot/reid.hpp"
 #include "ot/selector.hpp"
 #include "ot/target_sink.hpp"
@@ -296,6 +297,10 @@ int main(int argc, char** argv) {
                              cfg.lock.reacquire_margin);
         if (cfg.lock.smoothing > 0.0f)
             std::printf("[run] output smoothing: %.2f\n", cfg.lock.smoothing);
+        // Distance to the locked target, from telemetry + class-size priors.
+        // Lives on the inference thread only (constructed here, used in its tail).
+        ot::RangeEstimator ranger(cfg.range, W, H, class_map);
+
         // --out FILE forces a jsonl sink to that path (overrides config), so each
         // tracker config can dump to its own file for an objective A/B comparison.
         auto sink = out_override.empty()
@@ -470,7 +475,7 @@ int main(int argc, char** argv) {
                 bool do_reset = false, do_click = false;
                 cv::Point2f click;
                 cmds.drain(do_reset, do_click, click);
-                if (do_reset) { lock.reset(); last_target = ot::TargetState{}; }
+                if (do_reset) { lock.reset(); last_target = ot::TargetState{}; ranger.reset(); }
 
                 auto tracks = tracker.update(in.img, dets);
                 const double infer_ms = dur_ms(t0, std::chrono::steady_clock::now());
@@ -496,6 +501,17 @@ int main(int argc, char** argv) {
                                        cfg.lock.smoothing);
                 else
                     box_smoother.reset();
+
+                // Distance to the locked target (smoothed box + this frame's
+                // telemetry). Serial-tail safe: pure CPU trig, never touches the
+                // detector or det_mutex, well under the locked-ROI time budget.
+                {
+                    const ot::TeleFrame* tf = telemetry ? telemetry->at(in.index) : nullptr;
+                    const ot::RangeEstimate est = ranger.update(target, tf);
+                    target.range_slant_m  = est.slant_m;
+                    target.range_ground_m = est.ground_m;
+                    target.range_method   = est.method;
+                }
 
                 const bool locked = lock.has_target() || lock.state() == ot::LockState::Lost;
                 if (locked) {

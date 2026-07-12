@@ -81,6 +81,7 @@ add_library(ot_core
   src/reid/onnx_reid_embedder.cpp
   src/output/jsonl_sink.cpp
   src/geo/telemetry.cpp
+  src/geo/range_estimator.cpp
   src/ui/overlay.cpp
   src/ui/selector.cpp
 )
