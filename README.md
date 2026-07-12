@@ -1,4 +1,6 @@
-# Object Tracking
+<h1 align="center">🎯 SkyLock</h1>
+
+<p align="center"><b>Real-time click-to-lock target tracking &amp; ranging for drone video</b></p>
 
 A C++ application that detects people and vehicles in any video and lets you
 **lock a single target by clicking it**, then follows only that target. It
@@ -23,6 +25,19 @@ with the animated reticle marking the locked object:
 <video src="https://github.com/user-attachments/assets/5535745f-c6b6-4d19-9a40-b86f483f92d7" controls muted loop width="800"></video>
 
 <video src="https://github.com/user-attachments/assets/b2a26781-33e4-4fb6-b142-02f8469b4967" controls muted loop width="800"></video>
+
+### Tracking with live distance
+
+With a DJI `.SRT` sidecar next to the video, the lock also carries a live
+distance estimate — `~Nm` when gimbal attitude is available (ground-plane),
+`~Nm(est)` from the class-size prior when it isn't (see
+[Distance to the locked target](#distance-to-the-locked-target-dji-telemetry)):
+
+<video src="https://github.com/user-attachments/assets/8aff83f7-8d7e-4cec-95ea-d76d74e99103" controls muted loop width="800"></video>
+
+<video src="https://github.com/user-attachments/assets/8275c976-fc32-44db-bd79-0fd97226e6c1" controls muted loop width="800"></video>
+
+<video src="https://github.com/user-attachments/assets/4d6be4c9-96e4-4fb6-9afe-44d0bae33f0c" controls muted loop width="800"></video>
 
 ---
 
