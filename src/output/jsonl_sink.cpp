@@ -42,6 +42,12 @@ public:
             {"lock_id", s.lock_id},       // stable id for this lock (kept across re-acquire)
             {"track_id", s.track_id},     // raw MOT id (churns across re-acquires)
         };
+        if (s.range_method != RangeMethod::None && s.range_slant_m > 0.0f) {
+            j["range_slant_m"] = s.range_slant_m;
+            if (s.range_ground_m > 0.0f) j["range_ground_m"] = s.range_ground_m;
+            // "gp" = ground-plane (attitude); "est" = class-size prior
+            j["range_method"] = s.range_method == RangeMethod::GroundPlane ? "gp" : "est";
+        }
         out_ << j.dump() << '\n';
         out_.flush();
     }

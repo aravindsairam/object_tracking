@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <string>
 
 namespace ot {
@@ -148,6 +149,32 @@ struct OutputCfg {
     std::string path = "out/track.jsonl";
 };
 
+// Distance-to-target estimation for the LOCKED target (see ot::RangeEstimator).
+// Works out of the box on DJI clips with an SRT sidecar; without one, set
+// equiv_focal_mm to enable the size-prior method.
+struct RangeCfg {
+    bool enabled = true;
+
+    // Typical real-world size [m] of a class's LONGEST dimension, keyed by the
+    // class map's label (all presets' spellings included). Drives the
+    // no-attitude fallback ("est"). Config entries override/extend these.
+    std::map<std::string, float> size_priors = {
+        {"person", 1.7f},     {"Person", 1.7f},
+        {"bicycle", 1.8f},    {"Bike", 1.8f},          {"bike", 1.8f},
+        {"car", 4.6f},        {"LightVehicle", 4.6f},  {"light_vehicle", 4.6f},
+        {"motorcycle", 2.2f},
+        {"bus", 12.0f},       {"Bus", 12.0f},
+        {"truck", 8.0f},      {"Truck", 8.0f},
+    };
+
+    int   smooth_window       = 15;       // rolling-median window [frames]
+    float max_range_m         = 10000.f;  // discard implausible fixes beyond this
+    float min_depression_deg  = 1.0f;     // ground-plane: reject rays this close to horizon
+    float ground_alt_offset_m = 0.0f;     // target-ground elevation vs takeoff point [m]
+    float equiv_focal_mm      = 0.0f;     // 0 = per-frame from the SRT; set a 35mm-equiv
+                                          // value for videos without telemetry
+};
+
 // Top-level runtime configuration. Grows with later milestones.
 struct Config {
     DetectorCfg detector;
@@ -156,6 +183,7 @@ struct Config {
     LockCfg     lock;
     ReidCfg     reid;
     OutputCfg   output;
+    RangeCfg    range;
     int work_height = 640;              // working resolution (downscale target); 0 = native
     std::string decoder = "auto";       // video decode backend: auto | nvdec | software
 };

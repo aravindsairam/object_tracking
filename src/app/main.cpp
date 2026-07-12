@@ -6,9 +6,11 @@
 #include "ot/mot_tracker.hpp"
 #include "ot/one_euro.hpp"
 #include "ot/overlay.hpp"
+#include "ot/range_estimator.hpp"
 #include "ot/reid.hpp"
 #include "ot/selector.hpp"
 #include "ot/target_sink.hpp"
+#include "ot/telemetry.hpp"
 #include "ot/video_source.hpp"
 
 #include <opencv2/highgui.hpp>
@@ -185,6 +187,9 @@ int main(int argc, char** argv) {
             "  --display-fps N  cap display to N fps (default: source fps, max 60; 0=uncapped)\n"
             "  --zoom         show a magnified side panel of the locked target\n"
             "  --zoom-width N width of the zoom side panel in px (default: 360)\n"
+            "  --srt FILE     DJI SRT telemetry sidecar (default: auto-detect next to the video)\n"
+            "  --gimbal-pitch DEG  fixed gimbal pitch for ground-plane ranging (0=level, -90=nadir;\n"
+            "                 overrides SRT attitude; for clips with a known, held pitch)\n"
             "  keys:  click=lock  r=reset  space=pause  s=screenshot  q/ESC=quit\n",
             argv[0]);
         return 2;
@@ -201,6 +206,9 @@ int main(int argc, char** argv) {
     double display_fps = -1.0;     // -1 = match source fps (capped at 60); 0 = uncapped (benchmark)
     bool zoom = false;             // show a magnified side panel of the locked target
     int  zoom_w = 360;             // zoom side-panel width in px
+    std::string srt_override;      // --srt FILE: telemetry sidecar (else auto-detect)
+    bool   have_gimbal_pitch = false;
+    double gimbal_pitch = 0.0;     // --gimbal-pitch DEG: fixed attitude for ranging
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--height" && i + 1 < argc)      target_height = std::stoi(argv[++i]);
@@ -213,6 +221,11 @@ int main(int argc, char** argv) {
         else if (a == "--display-fps" && i + 1 < argc) display_fps = std::stod(argv[++i]);
         else if (a == "--zoom")                   zoom = true;
         else if (a == "--zoom-width" && i + 1 < argc) zoom_w = std::max(120, std::stoi(argv[++i]));
+        else if (a == "--srt" && i + 1 < argc)    srt_override = argv[++i];
+        else if (a == "--gimbal-pitch" && i + 1 < argc) {
+            gimbal_pitch = std::stod(argv[++i]);
+            have_gimbal_pitch = true;
+        }
         else if (ends_with(a, ".yaml") || ends_with(a, ".yml")) config_path = a;
     }
     // Enable the backend's inference timer (read in the OrtBackend ctor) before
@@ -232,6 +245,23 @@ int main(int argc, char** argv) {
                     cfg.detector.family.c_str(), cfg.detector.model_path.c_str(),
                     cfg.detector.class_map.c_str(), cfg.tiling.enabled ? "on" : "off");
         if (start_frame > 0) source.seek(start_frame);
+
+        // DJI SRT telemetry sidecar (drone GPS / altitude / per-frame focal;
+        // gimbal attitude on enterprise models). Auto-detected next to a file
+        // source, --srt overrides. Absence just leaves telemetry features off.
+        std::unique_ptr<ot::Telemetry> telemetry;
+        const std::string srt_path = !srt_override.empty() ? srt_override
+                                                           : ot::find_srt_sidecar(argv[1]);
+        if (!srt_path.empty()) {
+            try {
+                telemetry = std::make_unique<ot::Telemetry>(ot::parse_srt(srt_path));
+                std::printf("[run] telemetry: %s (%zu records%s)\n", srt_path.c_str(),
+                            telemetry->size(),
+                            telemetry->has_any_attitude() ? ", gimbal attitude" : "");
+            } catch (const std::exception& e) {
+                std::fprintf(stderr, "[run] telemetry unavailable: %s\n", e.what());
+            }
+        }
 
         auto detector = ot::make_detector(cfg.detector, cfg.tiling);
         const ot::ClassMap class_map = ot::ClassMap::preset(cfg.detector.class_map);
@@ -275,6 +305,15 @@ int main(int argc, char** argv) {
                              cfg.lock.reacquire_margin);
         if (cfg.lock.smoothing > 0.0f)
             std::printf("[run] output smoothing: %.2f\n", cfg.lock.smoothing);
+        // Distance to the locked target, from telemetry + class-size priors.
+        // Lives on the inference thread only (constructed here, used in its tail).
+        ot::RangeEstimator ranger(cfg.range, W, H, class_map);
+        if (have_gimbal_pitch) {
+            ranger.set_static_pitch(static_cast<float>(gimbal_pitch));
+            std::printf("[run] range: fixed gimbal pitch %.1f deg (ground-plane method)\n",
+                        gimbal_pitch);
+        }
+
         // --out FILE forces a jsonl sink to that path (overrides config), so each
         // tracker config can dump to its own file for an objective A/B comparison.
         auto sink = out_override.empty()
@@ -449,7 +488,7 @@ int main(int argc, char** argv) {
                 bool do_reset = false, do_click = false;
                 cv::Point2f click;
                 cmds.drain(do_reset, do_click, click);
-                if (do_reset) { lock.reset(); last_target = ot::TargetState{}; }
+                if (do_reset) { lock.reset(); last_target = ot::TargetState{}; ranger.reset(); }
 
                 auto tracks = tracker.update(in.img, dets);
                 const double infer_ms = dur_ms(t0, std::chrono::steady_clock::now());
@@ -475,6 +514,17 @@ int main(int argc, char** argv) {
                                        cfg.lock.smoothing);
                 else
                     box_smoother.reset();
+
+                // Distance to the locked target (smoothed box + this frame's
+                // telemetry). Serial-tail safe: pure CPU trig, never touches the
+                // detector or det_mutex, well under the locked-ROI time budget.
+                {
+                    const ot::TeleFrame* tf = telemetry ? telemetry->at(in.index) : nullptr;
+                    const ot::RangeEstimate est = ranger.update(target, tf);
+                    target.range_slant_m  = est.slant_m;
+                    target.range_ground_m = est.ground_m;
+                    target.range_method   = est.method;
+                }
 
                 const bool locked = lock.has_target() || lock.state() == ot::LockState::Lost;
                 if (locked) {
@@ -573,6 +623,30 @@ int main(int argc, char** argv) {
                               ema_disp_ms > 0 ? 1000.0 / ema_disp_ms : 0.0,
                               hint, paused.load() ? "  [PAUSED]" : "");
                 cv::putText(df.img, hud, {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0, 255, 0}, 2);
+
+                // Drone telemetry for THIS display frame (not the inference
+                // frame): GPS, altitude, per-frame focal, attitude if the SRT
+                // carries it. Telemetry is read-only after load, so reading it
+                // here off the inference thread is safe.
+                if (telemetry) {
+                    if (const ot::TeleFrame* tf = telemetry->at(df.index)) {
+                        char tl[192];
+                        int n = 0;
+                        if (tf->has_gps)
+                            n = std::snprintf(tl, sizeof(tl), "GPS %.6f, %.6f  ",
+                                              tf->lat, tf->lon);
+                        n += std::snprintf(tl + n, sizeof(tl) - n, "alt %.1fm",
+                                           tf->rel_alt);
+                        if (tf->has_focal)
+                            n += std::snprintf(tl + n, sizeof(tl) - n, "  f %.0fmm",
+                                               tf->focal_len);
+                        if (tf->has_attitude)
+                            std::snprintf(tl + n, sizeof(tl) - n, "  gimbal %.1f/%.1f/%.1f",
+                                          tf->gb_yaw, tf->gb_pitch, tf->gb_roll);
+                        cv::putText(df.img, tl, {12, 54}, cv::FONT_HERSHEY_SIMPLEX,
+                                    0.55, {0, 255, 0}, 1, cv::LINE_AA);
+                    }
+                }
                 const double draw_ms = dur_ms(td0, std::chrono::steady_clock::now());
                 ema_draw = ema_draw == 0.0 ? draw_ms : 0.9 * ema_draw + 0.1 * draw_ms;
 
