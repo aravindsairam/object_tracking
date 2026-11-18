@@ -289,12 +289,21 @@ int main(int argc, char** argv) {
         }
 
         ot::MotTracker tracker(cfg.tracker, static_cast<int>(fps), reid);
+        // Print the association metric + gate so an A/B run shows what is really
+        // active (biou also shows its buffer ratio).
+        char asso[64];
+        if (cfg.tracker.asso_func == "biou")
+            std::snprintf(asso, sizeof asso, "asso=biou r=%.2f gate=%.2f",
+                          cfg.tracker.buffer_ratio, cfg.tracker.iou_threshold);
+        else
+            std::snprintf(asso, sizeof asso, "asso=%s gate=%.2f",
+                          cfg.tracker.asso_func.c_str(), cfg.tracker.iou_threshold);
         if (cfg.tracker.type == "botsort")
-            std::printf("[run] tracker: botsort (reid=%s, gmc=%s)\n",
+            std::printf("[run] tracker: botsort %s (reid=%s, gmc=%s)\n", asso,
                         (cfg.tracker.with_reid && reid) ? "on" : "off",
                         cfg.tracker.cmc_method == "ecc" ? "ecc" : "off");
         else
-            std::printf("[run] tracker: %s\n", cfg.tracker.type.c_str());
+            std::printf("[run] tracker: %s %s\n", cfg.tracker.type.c_str(), asso);
 
         // coast_to_lost is referenced to 30 fps; scale to source fps so the lock
         // tolerates the same ~wall-clock occlusion at 60 fps as it would at 30.
@@ -302,7 +311,7 @@ int main(int argc, char** argv) {
         const int coast = std::max(1, static_cast<int>(cfg.lock.coast_to_lost * fps_scale + 0.5));
         ot::LockManager lock(fps, coast, cfg.lock.reacquire_thresh, reid,
                              cfg.lock.verify_thresh, cfg.lock.reacquire_max_frac,
-                             cfg.lock.reacquire_margin);
+                             cfg.lock.reacquire_margin, cfg.lock.reacquire_thresh_single);
         if (cfg.lock.smoothing > 0.0f)
             std::printf("[run] output smoothing: %.2f\n", cfg.lock.smoothing);
         // Distance to the locked target, from telemetry + class-size priors.

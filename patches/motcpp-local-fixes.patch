@@ -1,0 +1,377 @@
+diff --git a/include/motcpp/tracker.hpp b/include/motcpp/tracker.hpp
+index 81fe8df..1a6edef 100644
+--- a/include/motcpp/tracker.hpp
++++ b/include/motcpp/tracker.hpp
+@@ -97,7 +97,13 @@ public:
+      * Generate color for track ID
+      */
+     cv::Scalar id_to_color(int id, float saturation = 0.75f, float value = 0.95f) const;
+-    
++
++    /**
++     * Set the box-inflation ratio used by the "biou" association function.
++     * No effect unless asso_func is "biou". Default 0.3.
++     */
++    void set_buffer_ratio(float buffer_ratio) { asso_buffer_ratio_ = buffer_ratio; }
++
+ protected:
+     // Parameters
+     float det_thresh_;
+@@ -108,6 +114,7 @@ protected:
+     bool per_class_;
+     int nr_classes_;
+     std::string asso_func_name_;
++    float asso_buffer_ratio_ = 0.3f;   // box inflation for asso_func == "biou"
+     bool is_obb_;
+     
+     // State
+diff --git a/include/motcpp/utils/iou.hpp b/include/motcpp/utils/iou.hpp
+index 7841bde..7aa650b 100644
+--- a/include/motcpp/utils/iou.hpp
++++ b/include/motcpp/utils/iou.hpp
+@@ -129,15 +129,15 @@ inline Eigen::MatrixXf hmiou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::
+     
+     // Compute vertical overlap ratio
+     Eigen::MatrixXf intersect_y1 = bboxes1.col(1).replicate(1, M).cwiseMax(
+-                                    bboxes2.col(1).replicate(N, 1));
++                                    bboxes2.col(1).transpose().replicate(N, 1));
+     Eigen::MatrixXf intersect_y2 = bboxes1.col(3).replicate(1, M).cwiseMin(
+-                                  bboxes2.col(3).replicate(N, 1));
++                                  bboxes2.col(3).transpose().replicate(N, 1));
+     Eigen::MatrixXf intersection_height = (intersect_y2 - intersect_y1).cwiseMax(0.0f);
+     
+     Eigen::MatrixXf union_y1 = bboxes1.col(1).replicate(1, M).cwiseMin(
+-                               bboxes2.col(1).replicate(N, 1));
++                               bboxes2.col(1).transpose().replicate(N, 1));
+     Eigen::MatrixXf union_y2 = bboxes1.col(3).replicate(1, M).cwiseMax(
+-                               bboxes2.col(3).replicate(N, 1));
++                               bboxes2.col(3).transpose().replicate(N, 1));
+     Eigen::MatrixXf union_height = (union_y2 - union_y1).cwiseMax(1e-10f);
+     
+     Eigen::MatrixXf o = intersection_height.cwiseQuotient(union_height);
+@@ -165,13 +165,13 @@ inline Eigen::MatrixXf giou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::M
+     
+     // Compute smallest enclosing box
+     Eigen::MatrixXf xxc1 = bboxes1.col(0).replicate(1, M).cwiseMin(
+-                           bboxes2.col(0).replicate(N, 1));
++                           bboxes2.col(0).transpose().replicate(N, 1));
+     Eigen::MatrixXf yyc1 = bboxes1.col(1).replicate(1, M).cwiseMin(
+-                          bboxes2.col(1).replicate(N, 1));
++                          bboxes2.col(1).transpose().replicate(N, 1));
+     Eigen::MatrixXf xxc2 = bboxes1.col(2).replicate(1, M).cwiseMax(
+-                           bboxes2.col(2).replicate(N, 1));
++                           bboxes2.col(2).transpose().replicate(N, 1));
+     Eigen::MatrixXf yyc2 = bboxes1.col(3).replicate(1, M).cwiseMax(
+-                          bboxes2.col(3).replicate(N, 1));
++                          bboxes2.col(3).transpose().replicate(N, 1));
+     
+     Eigen::MatrixXf wc = xxc2 - xxc1;
+     Eigen::MatrixXf hc = yyc2 - yyc1;
+@@ -180,10 +180,12 @@ inline Eigen::MatrixXf giou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::M
+     Eigen::MatrixXf area1 = (bboxes1.col(2) - bboxes1.col(0)).cwiseProduct(
+                             (bboxes1.col(3) - bboxes1.col(1))).replicate(1, M);
+     Eigen::MatrixXf area2 = (bboxes2.col(2) - bboxes2.col(0)).cwiseProduct(
+-                            (bboxes2.col(3) - bboxes2.col(1))).replicate(N, 1);
++                            (bboxes2.col(3) - bboxes2.col(1))).transpose().replicate(N, 1);
+     
+-    Eigen::MatrixXf intersection = (iou.array() * (area1 + area2).array() / (iou.array() + 1e-10f)).matrix();
+-    Eigen::MatrixXf union_area = area1 + area2 - intersection;
++    // union = (A1 + A2) / (1 + IoU), from IoU = I/U and U = A1 + A2 - I. The prior
++    // form divided by IoU (not 1 + IoU), collapsing union to ~0 and making GIoU =
++    // IoU - 1 — e.g. 0.5 instead of 1.0 (rescaled) for identical boxes.
++    Eigen::MatrixXf union_area = ((area1 + area2).array() / (1.0f + iou.array() + 1e-10f)).matrix();
+     
+     Eigen::MatrixXf giou = iou - (area_enclose - union_area).cwiseQuotient((area_enclose.array() + 1e-10f).matrix());
+     giou = (giou.array() + 1.0f) / 2.0f; // Resize from (-1,1) to (0,1)
+@@ -214,18 +216,18 @@ inline Eigen::MatrixXf ciou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::M
+     Eigen::MatrixXf centery2 = (bboxes2.col(1) + bboxes2.col(3)) / 2.0f;
+     
+     // Squared center distance
+-    Eigen::MatrixXf inner_diag = (centerx1.replicate(1, M) - centerx2.replicate(N, 1)).array().square() +
+-                                 (centery1.replicate(1, M) - centery2.replicate(N, 1)).array().square();
++    Eigen::MatrixXf inner_diag = (centerx1.replicate(1, M) - centerx2.transpose().replicate(N, 1)).array().square() +
++                                 (centery1.replicate(1, M) - centery2.transpose().replicate(N, 1)).array().square();
+     
+     // Smallest enclosing box diagonal
+     Eigen::MatrixXf xxc1 = bboxes1.col(0).replicate(1, M).cwiseMin(
+-                           bboxes2.col(0).replicate(N, 1));
++                           bboxes2.col(0).transpose().replicate(N, 1));
+     Eigen::MatrixXf yyc1 = bboxes1.col(1).replicate(1, M).cwiseMin(
+-                          bboxes2.col(1).replicate(N, 1));
++                          bboxes2.col(1).transpose().replicate(N, 1));
+     Eigen::MatrixXf xxc2 = bboxes1.col(2).replicate(1, M).cwiseMax(
+-                           bboxes2.col(2).replicate(N, 1));
++                           bboxes2.col(2).transpose().replicate(N, 1));
+     Eigen::MatrixXf yyc2 = bboxes1.col(3).replicate(1, M).cwiseMax(
+-                          bboxes2.col(3).replicate(N, 1));
++                          bboxes2.col(3).transpose().replicate(N, 1));
+     
+     Eigen::MatrixXf outer_diag = (xxc2 - xxc1).array().square() + 
+                                 (yyc2 - yyc1).array().square() + epsilon;
+@@ -236,7 +238,7 @@ inline Eigen::MatrixXf ciou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::M
+     Eigen::VectorXf w2 = bboxes2.col(2) - bboxes2.col(0);
+     Eigen::VectorXf h2 = bboxes2.col(3) - bboxes2.col(1);
+     
+-    Eigen::MatrixXf arctan_diff = (w2.replicate(N, 1).array() / (h2.replicate(N, 1).array() + epsilon)).atan() -
++    Eigen::MatrixXf arctan_diff = (w2.transpose().replicate(N, 1).array() / (h2.transpose().replicate(N, 1).array() + epsilon)).atan() -
+                                   (w1.replicate(1, M).array() / (h1.replicate(1, M).array() + epsilon)).atan();
+     const float pi_squared = static_cast<float>(M_PI * M_PI);
+     Eigen::MatrixXf v = (4.0f / pi_squared) * arctan_diff.array().square();
+@@ -273,18 +275,18 @@ inline Eigen::MatrixXf diou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::M
+     Eigen::MatrixXf centery2 = (bboxes2.col(1) + bboxes2.col(3)) / 2.0f;
+     
+     // Inner diagonal
+-    Eigen::MatrixXf inner_diag = (centerx1.replicate(1, M) - centerx2.replicate(N, 1)).array().square() +
+-                                 (centery1.replicate(1, M) - centery2.replicate(N, 1)).array().square();
++    Eigen::MatrixXf inner_diag = (centerx1.replicate(1, M) - centerx2.transpose().replicate(N, 1)).array().square() +
++                                 (centery1.replicate(1, M) - centery2.transpose().replicate(N, 1)).array().square();
+     
+     // Outer diagonal
+     Eigen::MatrixXf xxc1 = bboxes1.col(0).replicate(1, M).cwiseMin(
+-                           bboxes2.col(0).replicate(N, 1));
++                           bboxes2.col(0).transpose().replicate(N, 1));
+     Eigen::MatrixXf yyc1 = bboxes1.col(1).replicate(1, M).cwiseMin(
+-                          bboxes2.col(1).replicate(N, 1));
++                          bboxes2.col(1).transpose().replicate(N, 1));
+     Eigen::MatrixXf xxc2 = bboxes1.col(2).replicate(1, M).cwiseMax(
+-                           bboxes2.col(2).replicate(N, 1));
++                           bboxes2.col(2).transpose().replicate(N, 1));
+     Eigen::MatrixXf yyc2 = bboxes1.col(3).replicate(1, M).cwiseMax(
+-                          bboxes2.col(3).replicate(N, 1));
++                          bboxes2.col(3).transpose().replicate(N, 1));
+     
+     Eigen::MatrixXf outer_diag = (xxc2 - xxc1).array().square() + 
+                                 (yyc2 - yyc1).array().square();
+@@ -294,6 +296,43 @@ inline Eigen::MatrixXf diou_batch(const Eigen::MatrixXf& bboxes1, const Eigen::M
+     return (diou.array() + 1.0f) / 2.0f;
+ }
+ 
++/**
++ * Buffered IoU (BIoU)
++ *
++ * Inflate every box about its center by a size-proportional buffer
++ * (w -> (1 + 2*buffer_ratio)*w, h -> (1 + 2*buffer_ratio)*h) for BOTH box sets,
++ * then return standard IoU on the inflated boxes. Small/fast boxes whose plain IoU
++ * collapses to ~0 between frames still overlap once buffered, so they stay
++ * associated. Output stays in [0,1] (it is plain IoU on larger boxes), so no
++ * rescaling is needed and the iou_threshold gate applies directly — though, since
++ * inflation only raises overlap, a given threshold is more permissive than plain IoU.
++ * This is the core mechanism of C-BIoU (Yang et al., WACV 2023) used as a single
++ * association metric. Input boxes are [x1, y1, x2, y2(, ...)]; extra columns ignored.
++ */
++inline Eigen::MatrixXf biou_batch(const Eigen::MatrixXf& bboxes1,
++                                  const Eigen::MatrixXf& bboxes2,
++                                  float buffer_ratio = 0.3f) {
++    int N = static_cast<int>(bboxes1.rows());
++    int M = static_cast<int>(bboxes2.rows());
++
++    if (N == 0 || M == 0) {
++        return Eigen::MatrixXf::Zero(N, M);
++    }
++
++    auto inflate = [buffer_ratio](const Eigen::MatrixXf& b) {
++        Eigen::VectorXf w = b.col(2) - b.col(0);
++        Eigen::VectorXf h = b.col(3) - b.col(1);
++        Eigen::MatrixXf out(b.rows(), 4);
++        out.col(0) = b.col(0).array() - buffer_ratio * w.array();
++        out.col(1) = b.col(1).array() - buffer_ratio * h.array();
++        out.col(2) = b.col(2).array() + buffer_ratio * w.array();
++        out.col(3) = b.col(3).array() + buffer_ratio * h.array();
++        return out;
++    };
++
++    return iou_batch(inflate(bboxes1), inflate(bboxes2));
++}
++
+ /**
+  * Centroid distance (normalized) for axis-aligned boxes
+  */
+@@ -372,8 +411,9 @@ class AssociationFunction {
+ public:
+     using AssoFunc = std::function<Eigen::MatrixXf(const Eigen::MatrixXf&, const Eigen::MatrixXf&)>;
+     
+-    AssociationFunction(int w, int h, const std::string& asso_mode = "iou")
+-        : frame_width_(w), frame_height_(h) {
++    AssociationFunction(int w, int h, const std::string& asso_mode = "iou",
++                        float buffer_ratio = 0.3f)
++        : frame_width_(w), frame_height_(h), buffer_ratio_(buffer_ratio) {
+         asso_func_ = get_asso_func(asso_mode);
+     }
+     
+@@ -395,6 +435,11 @@ private:
+             return ciou_batch;
+         } else if (mode == "diou") {
+             return diou_batch;
++        } else if (mode == "biou") {
++            float b = buffer_ratio_;
++            return [b](const Eigen::MatrixXf& b1, const Eigen::MatrixXf& b2) {
++                return biou_batch(b1, b2, b);
++            };
+         } else if (mode == "centroid") {
+             return [this](const Eigen::MatrixXf& b1, const Eigen::MatrixXf& b2) {
+                 return centroid_batch(b1, b2, frame_width_, frame_height_);
+@@ -410,6 +455,7 @@ private:
+     
+     int frame_width_;
+     int frame_height_;
++    float buffer_ratio_;   // box inflation for the "biou" mode; ignored by other modes
+     AssoFunc asso_func_;
+ };
+ 
+diff --git a/src/trackers/ocsort.cpp b/src/trackers/ocsort.cpp
+index e1958a6..c98e70d 100644
+--- a/src/trackers/ocsort.cpp
++++ b/src/trackers/ocsort.cpp
+@@ -410,7 +410,7 @@ Eigen::MatrixXf OCSort::update(const Eigen::MatrixXf& dets,
+     Eigen::MatrixXf dets_for_assoc = dets_high.leftCols(5);
+     Eigen::MatrixXf trks_for_assoc = trks.leftCols(5);
+     // Create association function
+-    utils::AssociationFunction asso_func(img_w, img_h, asso_func_name_);
++    utils::AssociationFunction asso_func(img_w, img_h, asso_func_name_, asso_buffer_ratio_);
+     ocsort_assoc::AssociateResult assoc_result = ocsort_assoc::associate(dets_for_assoc, trks_for_assoc,
+                                             asso_func, asso_threshold_,
+                                             velocities, k_observations,
+@@ -435,7 +435,7 @@ Eigen::MatrixXf OCSort::update(const Eigen::MatrixXf& dets,
+         }
+         
+         Eigen::MatrixXf dets_second_for_assoc = dets_second.leftCols(5);
+-        utils::AssociationFunction asso_func_byte(img_w, img_h, asso_func_name_);
++        utils::AssociationFunction asso_func_byte(img_w, img_h, asso_func_name_, asso_buffer_ratio_);
+         Eigen::MatrixXf iou_left = asso_func_byte(dets_second_for_assoc, u_trks.leftCols(5));
+         
+         float max_iou = iou_left.maxCoeff();
+@@ -491,7 +491,7 @@ Eigen::MatrixXf OCSort::update(const Eigen::MatrixXf& dets,
+             }
+         }
+         
+-        utils::AssociationFunction asso_func_rematch(img_w, img_h, asso_func_name_);
++        utils::AssociationFunction asso_func_rematch(img_w, img_h, asso_func_name_, asso_buffer_ratio_);
+         Eigen::MatrixXf iou_left = asso_func_rematch(left_dets.leftCols(4), left_trks.leftCols(4));
+         float max_iou = iou_left.maxCoeff();
+         
+diff --git a/tests/test_iou.cpp b/tests/test_iou.cpp
+index f58b1af..5c961a4 100644
+--- a/tests/test_iou.cpp
++++ b/tests/test_iou.cpp
+@@ -74,7 +74,7 @@ TEST_F(IoUTest, EmptyBatchReturnsEmptyMatrix) {
+ 
+ TEST_F(IoUTest, GIoUComputation) {
+     Eigen::MatrixXf giou = giou_batch(box1_, box2_);
+-    
++
+     // GIoU should be in [0, 1] after scaling
+     EXPECT_GE(giou(0, 0), 0.0f);
+     EXPECT_LE(giou(0, 0), 1.0f);
+@@ -82,7 +82,7 @@ TEST_F(IoUTest, GIoUComputation) {
+ 
+ TEST_F(IoUTest, DIoUComputation) {
+     Eigen::MatrixXf diou = diou_batch(box1_, box2_);
+-    
++
+     // DIoU should be in [0, 1] after scaling
+     EXPECT_GE(diou(0, 0), 0.0f);
+     EXPECT_LE(diou(0, 0), 1.0f);
+@@ -90,12 +90,102 @@ TEST_F(IoUTest, DIoUComputation) {
+ 
+ TEST_F(IoUTest, CIoUComputation) {
+     Eigen::MatrixXf ciou = ciou_batch(box1_, box2_);
+-    
++
+     // CIoU should be in [0, 1] after scaling
+     EXPECT_GE(ciou(0, 0), 0.0f);
+     EXPECT_LE(ciou(0, 0), 1.0f);
+ }
+ 
++// Regression: the variant association metrics (giou/diou/ciou/hmiou) are vectorized
++// with Eigen broadcasting and must produce an N×M matrix for a TRUE batch (N>1, M>1).
++// A 1×1 input cannot catch a row-vs-column broadcast bug, so these use a 2×3 batch
++// with two exact self-matches and assert each self-match is the max of its row.
++// (Before the broadcast fix, these threw on the dimension mismatch / read OOB.)
++class VariantBatchTest : public ::testing::Test {
++protected:
++    void SetUp() override {
++        a_ = Eigen::MatrixXf(2, 4);
++        a_ << 0, 0, 100, 100,
++              200, 200, 300, 300;
++        b_ = Eigen::MatrixXf(3, 4);
++        b_ << 0, 0, 100, 100,          // == a_[0]
++              50, 50, 150, 150,        // partial overlap with a_[0]
++              200, 200, 300, 300;      // == a_[1]
++    }
++    Eigen::MatrixXf a_, b_;
++
++    // self-match at (row, selfCol) must be 1.0 and the largest entry in its row.
++    void checkSelfMatchDominates(const Eigen::MatrixXf& m, int row, int selfCol) {
++        ASSERT_EQ(m.rows(), 2);
++        ASSERT_EQ(m.cols(), 3);
++        EXPECT_NEAR(m(row, selfCol), 1.0f, 1e-4f);
++        for (int j = 0; j < m.cols(); ++j)
++            if (j != selfCol) EXPECT_GE(m(row, selfCol), m(row, j));
++    }
++};
++
++TEST_F(VariantBatchTest, GIoUBatchShapeAndSelfMatch) {
++    Eigen::MatrixXf m = giou_batch(a_, b_);
++    checkSelfMatchDominates(m, 0, 0);
++    checkSelfMatchDominates(m, 1, 2);
++}
++
++TEST_F(VariantBatchTest, DIoUBatchShapeAndSelfMatch) {
++    Eigen::MatrixXf m = diou_batch(a_, b_);
++    checkSelfMatchDominates(m, 0, 0);
++    checkSelfMatchDominates(m, 1, 2);
++}
++
++TEST_F(VariantBatchTest, CIoUBatchShapeAndSelfMatch) {
++    Eigen::MatrixXf m = ciou_batch(a_, b_);
++    checkSelfMatchDominates(m, 0, 0);
++    checkSelfMatchDominates(m, 1, 2);
++}
++
++TEST_F(VariantBatchTest, HMIoUBatchShapeAndSelfMatch) {
++    Eigen::MatrixXf m = hmiou_batch(a_, b_);
++    checkSelfMatchDominates(m, 0, 0);
++    checkSelfMatchDominates(m, 1, 2);
++}
++
++TEST_F(VariantBatchTest, BIoUBatchShapeAndSelfMatch) {
++    Eigen::MatrixXf m = biou_batch(a_, b_, 0.3f);
++    checkSelfMatchDominates(m, 0, 0);
++    checkSelfMatchDominates(m, 1, 2);
++}
++
++// BIoU's purpose: a near-miss pair (plain IoU == 0) gains overlap once buffered.
++// Two 100px boxes one box-width apart (edges touch at x=100) -> plain IoU 0; a
++// large-enough buffer inflates both so they overlap -> biou > 0.
++TEST(BIoUTest, BufferCreatesOverlapForNearMiss) {
++    Eigen::MatrixXf d(1, 4); d << 0, 0, 100, 100;
++    Eigen::MatrixXf t(1, 4); t << 100, 0, 200, 100;   // adjacent, no overlap
++
++    EXPECT_FLOAT_EQ(iou_batch(d, t)(0, 0), 0.0f);     // plain IoU: no overlap
++    EXPECT_FLOAT_EQ(biou_batch(d, t, 0.0f)(0, 0), 0.0f);  // zero buffer == plain IoU
++    EXPECT_GT(biou_batch(d, t, 0.5f)(0, 0), 0.0f);    // buffered: now overlaps
++    // Larger buffer -> more overlap -> higher BIoU.
++    EXPECT_GT(biou_batch(d, t, 0.8f)(0, 0), biou_batch(d, t, 0.5f)(0, 0));
++}
++
++// The selector path the trackers use must honor the buffer_ratio ctor arg.
++TEST(BIoUTest, AssociationFunctionBIoUUsesBufferRatio) {
++    Eigen::MatrixXf d(1, 4); d << 0, 0, 100, 100;
++    Eigen::MatrixXf t(1, 4); t << 100, 0, 200, 100;
++    AssociationFunction no_buffer(640, 480, "biou", 0.0f);
++    AssociationFunction buffered(640, 480, "biou", 0.5f);
++    EXPECT_FLOAT_EQ(no_buffer(d, t)(0, 0), 0.0f);
++    EXPECT_GT(buffered(d, t)(0, 0), 0.0f);
++}
++
++// The selector path used by the trackers (asso_func string) must also handle a batch.
++TEST_F(VariantBatchTest, AssociationFunctionDIoUBatch) {
++    AssociationFunction asso(640, 480, "diou");
++    Eigen::MatrixXf m = asso(a_, b_);
++    checkSelfMatchDominates(m, 0, 0);
++    checkSelfMatchDominates(m, 1, 2);
++}
++
+ TEST_F(IoUTest, AssociationFunctionIoU) {
+     AssociationFunction asso(640, 480, "iou");
+     Eigen::MatrixXf result = asso(box1_, box2_);

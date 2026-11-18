@@ -147,7 +147,11 @@ Verify the math without a GPU: `./build/test_range [flight.SRT]`.
 - **FFmpeg** dev libraries (`libavformat libavcodec libavutil libswscale`) for
   the NVDEC hardware-decode path.
 - **ONNX Runtime (GPU build)** vendored at `third_party/onnxruntime/`.
-- **motcpp** (ByteTrack/BoT-SORT) vendored at `third_party/motcpp/`.
+- **motcpp** (ByteTrack/BoT-SORT/OC-SORT) vendored at `third_party/motcpp/`
+  (upstream commit `b35c189`) with our fixes applied from
+  `patches/motcpp-local-fixes.patch` (IoU-variant bugs + buffered IoU):
+  `git -C third_party/motcpp apply ../../patches/motcpp-local-fixes.patch`.
+  CMake refuses to configure against an unpatched copy.
 - For the **TensorRT** backend: the `tensorrt` pip wheel (provides
   `libnvinfer.so.10`). Without it, the TensorRT backend silently falls back to
   the slower CUDA EP.
