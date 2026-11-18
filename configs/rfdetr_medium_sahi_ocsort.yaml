@@ -63,6 +63,8 @@ lock:
                             # for steadier/laggier. Does NOT affect the tracker or ROI prediction.
   reacquire_thresh: 0.75     # refuse weak re-acquires (field logs showed wrong near-locks at cos~0.60)
   reacquire_margin: 0.10     # best must beat runner-up by this; refuses an ambiguous re-acquire
+  reacquire_thresh_single: 0.90  # a LONE re-acquire candidate (no runner-up) must clear this
+                            # stricter bar, else stay LOST for a re-click (default 0.90).
   verify_thresh:    0.35     # per-frame appearance gate on the matched id; below it the track is
                             # treated as a miss, so the lock stops following an id-switch. 0 disables.
   reacquire_max_frac: 0.2    # re-acquire search radius cap = this * min(W,H); stops far re-locks

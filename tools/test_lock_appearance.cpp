@@ -211,6 +211,67 @@ void test_reacquire_accepts_clear_winner() {
     check(ts.state == ot::LockState::Locked, "locked after a clear-winner re-acquire");
 }
 
+// A LONE re-acquire candidate (no runner-up to disambiguate) must clear the
+// stricter single-candidate bar (reacquire_thresh_single, default 0.90), not just
+// reacquire_thresh. This is the confirmed field bug: best=0.859 2nd=-1.000 -> the
+// margin guard was bypassed and a different 0.86 object bound the lock.
+class LoneReid : public ot::ReidEmbedder {
+public:
+    explicit LoneReid(float candidate_cos) {
+        // candidate embedding (cos, sqrt(1-cos^2)) so its cosine to the template
+        // (1,0) equals candidate_cos. Only objects on the right (center.x>=200)
+        // get it; the template object (center.x<200) stays (1,0).
+        const float s = std::sqrt(std::max(0.0f, 1.0f - candidate_cos * candidate_cos));
+        cand_ = {candidate_cos, s};
+    }
+    ot::Embedding embed(const cv::Mat&, const ot::BBox& b) override {
+        return b.center().x < 200.0f ? ot::Embedding{1.0f, 0.0f} : cand_;
+    }
+private:
+    ot::Embedding cand_;
+};
+
+// Lone candidate at cos 0.86 (above reacquire_thresh 0.75, below the 0.90 single
+// bar) sitting near the last position. Must be REFUSED -> stay LOST for a re-click.
+void test_reacquire_rejects_lone_weak_candidate() {
+    std::printf("test: re-acquire rejects a lone weak candidate (no runner-up)\n");
+    cv::Mat frame = cv::Mat::zeros(720, 1280, CV_8UC3);
+    ot::LockManager lock(/*fps*/ 30.0, /*coast_to_lost*/ 3, /*reacquire_thresh*/ 0.75f,
+                         std::make_shared<LoneReid>(0.86f), /*verify_thresh*/ 0.35f,
+                         /*reacquire_max_frac*/ 0.2f, /*reacquire_margin*/ 0.10f);
+                         // reacquire_thresh_single defaults to 0.90
+
+    ot::Track a = track(7, 100.0f);          // center 150 -> template (1,0)
+    lock.select(a.box.center(), frame, {a});
+
+    ot::Track lone = track(99, 160.0f);      // center 210 -> cos 0.86, dist 60, SINGLE candidate
+    ot::TargetState ts;
+    for (int k = 0; k < 8; ++k) ts = lock.update(frame, {lone});
+    std::printf("  -> state=%s locked_id=%d\n", sname(ts.state), lock.locked_id());
+
+    check(lock.locked_id() != 99, "did not re-acquire a lone 0.86 candidate (below single bar)");
+    check(ts.state == ot::LockState::Lost, "stayed LOST on a lone weak candidate");
+}
+
+// Guard against over-rejection: a lone candidate that clears the single bar (cos
+// 0.95) near the last position must still re-acquire (genuine same-target recovery).
+void test_reacquire_accepts_lone_strong_candidate() {
+    std::printf("test: re-acquire accepts a lone strong candidate (clears single bar)\n");
+    cv::Mat frame = cv::Mat::zeros(720, 1280, CV_8UC3);
+    ot::LockManager lock(30.0, 3, 0.75f, std::make_shared<LoneReid>(0.95f), 0.35f, 0.2f, 0.10f);
+
+    ot::Track a = track(7, 100.0f);          // center 150 -> template (1,0)
+    lock.select(a.box.center(), frame, {a});
+
+    ot::Track lone = track(99, 160.0f);      // center 210 -> cos 0.95, dist 60, SINGLE candidate
+    ot::TargetState ts;
+    for (int k = 0; k < 8; ++k) ts = lock.update(frame, {lone});
+    std::printf("  -> state=%s locked_id=%d\n", sname(ts.state), lock.locked_id());
+
+    check(lock.locked_id() == 99, "re-acquired a lone 0.95 candidate (clears single bar)");
+    check(ts.state == ot::LockState::Locked, "locked after a lone strong re-acquire");
+}
+
 // The HUD id must stay the same object across a re-acquire, even though the
 // underlying MOT id churns. (Field: one target showed ids 23,47,935,3074,3652.)
 void test_lock_id_stable_across_reacquire() {
@@ -256,6 +317,8 @@ int main() {
     test_reacquire_accepts_near_lookalike();
     test_reacquire_rejects_ambiguous_lookalikes();
     test_reacquire_accepts_clear_winner();
+    test_reacquire_rejects_lone_weak_candidate();
+    test_reacquire_accepts_lone_strong_candidate();
     test_lock_id_stable_across_reacquire();
     test_class_is_stable_under_flicker();
     std::printf("%s (%d failure%s)\n", failures == 0 ? "ALL PASS" : "FAILED",
