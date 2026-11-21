@@ -8,7 +8,7 @@ namespace ot {
 
 // Decodes frames from a video file / RTSP URL / camera into BGR cv::Mat at a
 // working resolution. The "decode axis": the same VideoSource/pipeline runs on
-// top of OpenCV/FFmpeg software decode (OcvDecoder) or NVIDIA NVDEC hardware
+// top of OpenCV/FFmpeg software decode (OcvDecoder) or NVDEC hardware
 // decode (NvdecDecoder) — only this implementation changes. All coordinates the
 // rest of the system sees live in the working-resolution space.
 class FrameDecoder {

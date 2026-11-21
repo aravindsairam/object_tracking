@@ -5,7 +5,7 @@
 Click a person or vehicle in a drone video and SkyLock stays locked on it through
 camera motion, short occlusions and look-alikes nearby. If it truly loses the
 target it says so, instead of drifting onto something else. With drone telemetry it
-also estimates the distance to the target. Real-time C++ on NVIDIA GPUs.
+also estimates the distance to the target. Real-time C++ on the GPU.
 
 ## Demo
 
@@ -42,7 +42,7 @@ also estimates the distance to the target. Real-time C++ on NVIDIA GPUs.
 
 ## Quick start
 
-**You need:** Linux, an NVIDIA GPU, CUDA 12 (CMake expects `/usr/local/cuda-12.6`),
+**You need:** Linux, a GPU with CUDA 12 (CMake expects `/usr/local/cuda-12.6`),
 cuDNN 9, CMake ≥ 3.18 and a C++17 compiler.
 
 ```bash

@@ -20,7 +20,7 @@ find_package(OpenCV REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
 # FFmpeg libraries for the NVDEC (NvdecDecoder) hardware-decode path. The system
-# libavcodec is built with NVIDIA cuvid (it links libnvcuvid at runtime), so no
+# libavcodec is built with cuvid (it links libnvcuvid at runtime), so no
 # extra SDK is needed. Used directly (NOT via OpenCV's VideoCapture).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
