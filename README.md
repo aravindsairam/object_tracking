@@ -20,11 +20,11 @@ output is an on-screen overlay plus a structured per-frame record on disk.
 A single clicked target stays locked through camera motion and nearby look-alikes,
 with the animated reticle marking the locked object:
 
-<video src="https://github.com/user-attachments/assets/f0062e74-1bb4-4f90-8a76-1f350c8e213b" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/918c238e-250e-450c-a7ef-56439afaee70" controls muted loop width="800"></video>
 
-<video src="https://github.com/user-attachments/assets/5535745f-c6b6-4d19-9a40-b86f483f92d7" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/8e37e3f4-de5b-4e32-bb85-b4fd31aff939" controls muted loop width="800"></video>
 
-<video src="https://github.com/user-attachments/assets/b2a26781-33e4-4fb6-b142-02f8469b4967" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/14598d87-b5f9-4de1-a26a-2b1b47fa4dc0" controls muted loop width="800"></video>
 
 ### Tracking with live distance
 
@@ -33,11 +33,11 @@ distance estimate — `~Nm` when gimbal attitude is available (ground-plane),
 `~Nm(est)` from the class-size prior when it isn't (see
 [Distance to the locked target](#distance-to-the-locked-target-dji-telemetry)):
 
-<video src="https://github.com/user-attachments/assets/8aff83f7-8d7e-4cec-95ea-d76d74e99103" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/70cd8431-bad0-43e9-8f0f-f4f751b7e86a" controls muted loop width="800"></video>
 
-<video src="https://github.com/user-attachments/assets/8275c976-fc32-44db-bd79-0fd97226e6c1" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/23e1d421-8fcc-48d3-b6f5-6aa8789e4990" controls muted loop width="800"></video>
 
-<video src="https://github.com/user-attachments/assets/4d6be4c9-96e4-4fb6-9afe-44d0bae33f0c" controls muted loop width="800"></video>
+<video src="https://github.com/user-attachments/assets/478876da-7214-4a5b-be90-b66c92254711" controls muted loop width="800"></video>
 
 ---
 
