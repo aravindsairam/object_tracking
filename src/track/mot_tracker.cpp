@@ -32,7 +32,7 @@ struct MotTracker::Impl {
                 /*iou_threshold*/ cfg.iou_threshold,
                 /*per_class    */ false,   // keep id across class flips (car<->truck)
                 /*nr_classes   */ 80,
-                /*asso_func    */ "iou",
+                /*asso_func    */ cfg.asso_func,
                 /*is_obb       */ false,
                 /*min_conf     */ cfg.min_conf,
                 /*track_thresh */ cfg.track_thresh,
@@ -51,7 +51,7 @@ struct MotTracker::Impl {
                 /*iou_threshold     */ cfg.iou_threshold,
                 /*per_class         */ false,
                 /*nr_classes        */ 80,
-                /*asso_func         */ "iou",
+                /*asso_func         */ cfg.asso_func,
                 /*is_obb            */ false,
                 /*track_high_thresh */ cfg.track_thresh,
                 /*track_low_thresh  */ cfg.min_conf,
@@ -82,7 +82,7 @@ struct MotTracker::Impl {
                 /*iou_threshold*/ cfg.iou_threshold,
                 /*per_class    */ false,
                 /*nr_classes   */ 80,
-                /*asso_func    */ "iou",
+                /*asso_func    */ cfg.asso_func,
                 /*is_obb       */ false,
                 /*min_conf     */ cfg.min_conf,
                 /*delta_t      */ delta_t,
@@ -94,6 +94,11 @@ struct MotTracker::Impl {
             throw std::runtime_error("MotTracker: unknown tracker.type '" + cfg.type +
                                      "' (expected 'bytetrack', 'botsort' or 'ocsort')");
         }
+
+        // Box inflation for the "biou" association metric. No-op for other asso_funcs,
+        // so it is safe to set unconditionally. Currently only OC-SORT reads it when
+        // building its AssociationFunction; other trackers fall back to the 0.3 default.
+        tracker->set_buffer_ratio(cfg.buffer_ratio);
     }
 };
 

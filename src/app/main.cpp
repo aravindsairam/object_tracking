@@ -8,6 +8,7 @@
 #include "ot/overlay.hpp"
 #include "ot/range_estimator.hpp"
 #include "ot/reid.hpp"
+#include "ot/roi.hpp"
 #include "ot/selector.hpp"
 #include "ot/target_sink.hpp"
 #include "ot/telemetry.hpp"
@@ -120,28 +121,6 @@ struct SharedResult {
         return true;
     }
 };
-
-// Predicted search window around the locked target for the ROI fast-path: a
-// square centered on the target's next position (current center advanced by one
-// frame of its velocity), sized to `scale` x the target's largest dimension and
-// clamped to the frame. A tight crop is fine — the detector stretches it up to
-// the network input, so a small/distant target actually gains detail.
-cv::Rect predict_roi(const ot::TargetState& t, float scale, double fps, int W, int H) {
-    cv::Point2f c = t.center_px;
-    if (fps > 0) {
-        c.x += t.velocity_px_s.x / static_cast<float>(fps);
-        c.y += t.velocity_px_s.y / static_cast<float>(fps);
-    }
-    float side = scale * std::max(t.box.w, t.box.h);
-    side = std::max(side, 320.0f);                              // floor: search margin + context
-    side = std::min(side, static_cast<float>(std::min(W, H)));  // never exceed the frame
-    const int half = static_cast<int>(side * 0.5f);
-    const int x0 = std::max(0, static_cast<int>(c.x) - half);
-    const int y0 = std::max(0, static_cast<int>(c.y) - half);
-    const int x1 = std::min(W, static_cast<int>(c.x) + half);
-    const int y1 = std::min(H, static_cast<int>(c.y) + half);
-    return cv::Rect(x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0));
-}
 
 // UI -> inference command channel. The window/mouse/keys live on the main
 // (display) thread, but the lock state lives on the inference thread, so clicks
@@ -289,12 +268,21 @@ int main(int argc, char** argv) {
         }
 
         ot::MotTracker tracker(cfg.tracker, static_cast<int>(fps), reid);
+        // Print the association metric + gate so an A/B run shows what is really
+        // active (biou also shows its buffer ratio).
+        char asso[64];
+        if (cfg.tracker.asso_func == "biou")
+            std::snprintf(asso, sizeof asso, "asso=biou r=%.2f gate=%.2f",
+                          cfg.tracker.buffer_ratio, cfg.tracker.iou_threshold);
+        else
+            std::snprintf(asso, sizeof asso, "asso=%s gate=%.2f",
+                          cfg.tracker.asso_func.c_str(), cfg.tracker.iou_threshold);
         if (cfg.tracker.type == "botsort")
-            std::printf("[run] tracker: botsort (reid=%s, gmc=%s)\n",
+            std::printf("[run] tracker: botsort %s (reid=%s, gmc=%s)\n", asso,
                         (cfg.tracker.with_reid && reid) ? "on" : "off",
                         cfg.tracker.cmc_method == "ecc" ? "ecc" : "off");
         else
-            std::printf("[run] tracker: %s\n", cfg.tracker.type.c_str());
+            std::printf("[run] tracker: %s %s\n", cfg.tracker.type.c_str(), asso);
 
         // coast_to_lost is referenced to 30 fps; scale to source fps so the lock
         // tolerates the same ~wall-clock occlusion at 60 fps as it would at 30.
@@ -302,7 +290,7 @@ int main(int argc, char** argv) {
         const int coast = std::max(1, static_cast<int>(cfg.lock.coast_to_lost * fps_scale + 0.5));
         ot::LockManager lock(fps, coast, cfg.lock.reacquire_thresh, reid,
                              cfg.lock.verify_thresh, cfg.lock.reacquire_max_frac,
-                             cfg.lock.reacquire_margin);
+                             cfg.lock.reacquire_margin, cfg.lock.reacquire_thresh_single);
         if (cfg.lock.smoothing > 0.0f)
             std::printf("[run] output smoothing: %.2f\n", cfg.lock.smoothing);
         // Distance to the locked target, from telemetry + class-size priors.
@@ -460,7 +448,7 @@ int main(int argc, char** argv) {
 
                     t0 = std::chrono::steady_clock::now();
                     if (use_roi) {
-                        const cv::Rect roi = predict_roi(last_target, cfg.lock.roi_scale, fps, W, H);
+                        const cv::Rect roi = ot::predict_roi(last_target, cfg.lock.roi_scale, fps, W, H);
                         std::lock_guard<std::mutex> g(det_mutex);
                         auto local = detector->detect(in.img(roi));
                         dets.reserve(local.size());

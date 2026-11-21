@@ -54,6 +54,16 @@ if(NOT EXISTS "${TENSORRT_LIB_DIR}/libnvinfer.so.10")
 endif()
 
 # ---- motcpp (vendored, AGPL-3.0; isolated behind src/track/mot_tracker.cpp) --
+# third_party/ is gitignored, so our local motcpp fixes live in
+# patches/motcpp-local-fixes.patch (base: upstream b35c189). Without them the
+# giou/diou/ciou association paths read out of bounds and biou does not exist,
+# so refuse to configure against an unpatched tree.
+file(STRINGS "${CMAKE_SOURCE_DIR}/third_party/motcpp/include/motcpp/tracker.hpp"
+     _motcpp_patched REGEX "set_buffer_ratio")
+if(NOT _motcpp_patched)
+  message(FATAL_ERROR "third_party/motcpp is missing patches/motcpp-local-fixes.patch. Apply it:\n"
+                      "  git -C third_party/motcpp apply ../../patches/motcpp-local-fixes.patch")
+endif()
 # Build only the library: no tests/examples/tools/install, ONNX off until M5.
 set(MOTCPP_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
 set(MOTCPP_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
@@ -141,6 +151,14 @@ set_target_properties(test_lock_appearance PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
+# Logic-only unit test for the YAML loader: shipped configs load, unknown keys rejected.
+add_executable(test_config tools/test_config.cpp)
+target_link_libraries(test_config PRIVATE ot_core)
+target_link_options(test_config PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(test_config PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
 # Logic-only unit test for SRT telemetry parsing + locked-target range estimation.
 add_executable(test_range tools/test_range.cpp)
 target_link_libraries(test_range PRIVATE ot_core)
@@ -154,6 +172,14 @@ add_executable(test_lock_reticle tools/test_lock_reticle.cpp)
 target_link_libraries(test_lock_reticle PRIVATE ot_core)
 target_link_options(test_lock_reticle PRIVATE -Wl,--disable-new-dtags)
 set_target_properties(test_lock_reticle PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
+# Logic-only unit test for the locked-ROI search window (bounds + squareness).
+add_executable(test_roi tools/test_roi.cpp)
+target_link_libraries(test_roi PRIVATE ot_core)
+target_link_options(test_roi PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(test_roi PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
@@ -195,7 +221,7 @@ set_target_properties(bench_pipeline PROPERTIES
 # ---- warnings on our own targets (vendored motcpp left untouched) ----------
 # -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_lock_appearance test_lock_reticle test_range parity_dump test_batch_switch bench_batch_flip bench_pipeline)
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_config test_lock_appearance test_lock_reticle test_range test_roi parity_dump test_batch_switch bench_batch_flip bench_pipeline)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endforeach()
 endif()

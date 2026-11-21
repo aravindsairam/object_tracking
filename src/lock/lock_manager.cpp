@@ -52,13 +52,17 @@ void blend_template(Embedding& tpl, const Embedding& cur, float a) {
 
 LockManager::LockManager(double fps, int coast_to_lost, float reacquire_thresh,
                          std::shared_ptr<ReidEmbedder> reid, float verify_thresh,
-                         float reacquire_max_frac, float reacquire_margin)
+                         float reacquire_max_frac, float reacquire_margin,
+                         float reacquire_thresh_single)
     : fps_(fps > 0 ? fps : 30.0),
       coast_to_lost_(std::max(1, coast_to_lost)),
       reacquire_thresh_(reacquire_thresh),
       verify_thresh_(verify_thresh),
       reacquire_max_frac_(reacquire_max_frac > 0.0f ? reacquire_max_frac : 0.2f),
       reacquire_margin_(std::max(0.0f, reacquire_margin)),
+      // A lone candidate must clear at least the base threshold; never let the strict
+      // bar fall below it (a smaller value would be a no-op).
+      reacquire_thresh_single_(std::max(reacquire_thresh, reacquire_thresh_single)),
       reid_(std::move(reid)) {}
 
 void LockManager::reset() {
@@ -137,16 +141,24 @@ int LockManager::try_reacquire(const cv::Mat& frame, const std::vector<Track>& t
         if (score > best_score) { second_score = best_score; best_score = score; best_idx = i; }
         else if (score > second_score) { second_score = score; }
     }
-    // Require a confident, unambiguous match: above threshold AND clearly ahead
-    // of the runner-up (so we don't bind a similar-looking neighbor).
-    const bool ok = best_score >= reacquire_thresh_ &&
-                    !(second_score >= 0.0f && (best_score - second_score) < reacquire_margin_);
+    // Require a confident, unambiguous match. Two cases:
+    //  * A runner-up exists: best must clear the base threshold AND beat the runner-up
+    //    by the margin (so we don't bind a similar-looking neighbor on a coin-flip).
+    //  * No runner-up (the lone-candidate case): the margin guard can't apply, and a
+    //    lone object that drifts into range is NOT proof of identity — so it must clear
+    //    the STRICTER absolute bar (reacquire_thresh_single_). Otherwise stay LOST and
+    //    wait for a re-click. This closes the confirmed wrong-grab (best≈0.86, 2nd=-1).
+    const bool has_runner_up = second_score >= 0.0f;
+    const bool ok = has_runner_up
+                        ? (best_score >= reacquire_thresh_ &&
+                           (best_score - second_score) >= reacquire_margin_)
+                        : (best_score >= reacquire_thresh_single_);
     if (lock_debug() && best_idx >= 0) {
         const float d = std::sqrt(dist2(tracks[best_idx].box.center(), predicted));
         std::fprintf(stderr,
-            "[lock] reacquire %s: best=%.3f 2nd=%.3f thr=%.2f radius=%.0f dist=%.0f id=%d coast=%d\n",
+            "[lock] reacquire %s: best=%.3f 2nd=%.3f thr=%.2f single_thr=%.2f radius=%.0f dist=%.0f id=%d coast=%d\n",
             ok ? "ACCEPT" : "reject", best_score, second_score, reacquire_thresh_,
-            radius, d, tracks[best_idx].id, coast_);
+            reacquire_thresh_single_, radius, d, tracks[best_idx].id, coast_);
     }
     if (!ok) return -1;
     return best_idx;

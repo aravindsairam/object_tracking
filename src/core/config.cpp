@@ -1,13 +1,18 @@
 // YAML -> Config loader. One flat function reads each section (detector /
-// tiling / tracker / lock / reid / input / output) via get_or, so any missing
-// key falls back to the default already set on the Config struct. Only the few
-// hard requirements are validated (model paths present, tracker.type known);
-// everything else is optional. Throws on a missing/unparseable file.
+// tiling / tracker / lock / reid / input / output / range) via get_or, so any
+// missing key falls back to the default already set on the Config struct.
+// Unknown sections and keys are REJECTED (a typo or a key this build does not
+// understand must not load silently and run the defaults). Beyond that only the
+// few hard requirements are validated (model paths present, enums known).
+// Throws on a missing/unparseable file.
 #include "ot/config.hpp"
 
 #include <yaml-cpp/yaml.h>
 
+#include <algorithm>
+#include <initializer_list>
 #include <stdexcept>
+#include <string>
 
 namespace ot {
 
@@ -17,6 +22,28 @@ template <typename T>
 T get_or(const YAML::Node& node, const char* key, const T& fallback) {
     if (node && node[key]) return node[key].as<T>();
     return fallback;
+}
+
+// Throw if `node` (a YAML map, or absent) has any key outside `allowed`.
+// `where` names the section in the error ("tracker", or "<top level>").
+void require_known_keys(const YAML::Node& node, const std::string& where,
+                        std::initializer_list<const char*> allowed,
+                        const std::string& yaml_path) {
+    if (!node) return;
+    if (!node.IsMap()) {
+        throw std::runtime_error("load_config: '" + where + "' in " + yaml_path +
+                                 " must be a mapping");
+    }
+    for (const auto& kv : node) {
+        const std::string key = kv.first.as<std::string>();
+        const bool known = std::any_of(allowed.begin(), allowed.end(),
+                                       [&](const char* a) { return key == a; });
+        if (known) continue;
+        std::string list;
+        for (const char* a : allowed) list += std::string(list.empty() ? "" : ", ") + a;
+        throw std::runtime_error("load_config: unknown key '" + key + "' in " + where +
+                                 " of " + yaml_path + " (known: " + list + ")");
+    }
 }
 }  // namespace
 
@@ -28,6 +55,38 @@ Config load_config(const std::string& yaml_path) {
         throw std::runtime_error("load_config: cannot read '" + yaml_path +
                                  "': " + e.what());
     }
+
+    // Strict schema: every section and key this loader reads, and nothing else.
+    // Keep these lists in sync with the get_or calls below.
+    require_known_keys(root, "<top level>",
+                       {"detector", "tiling", "tracker", "lock", "reid", "output", "range", "input"},
+                       yaml_path);
+    require_known_keys(root["detector"], "detector",
+                       {"family", "model_path", "backend", "device", "precision", "int8_calib",
+                        "input_size", "input_u8", "b1_session", "conf", "nms_iou", "class_map"},
+                       yaml_path);
+    require_known_keys(root["tiling"], "tiling", {"enabled", "tile", "overlap", "full_frame"},
+                       yaml_path);
+    require_known_keys(root["tracker"], "tracker",
+                       {"type", "track_thresh", "match_thresh", "track_buffer", "min_conf",
+                        "iou_threshold", "asso_func", "buffer_ratio", "new_track_thresh",
+                        "proximity_thresh", "appearance_thresh", "cmc_method", "with_reid",
+                        "max_age", "delta_t", "inertia", "use_byte", "q_xy_scaling", "q_s_scaling"},
+                       yaml_path);
+    require_known_keys(root["lock"], "lock",
+                       {"coast_to_lost", "reacquire_thresh", "smoothing", "verify_thresh",
+                        "reacquire_max_frac", "reacquire_margin", "reacquire_thresh_single",
+                        "roi_fastpath", "roi_full_interval", "roi_scale"},
+                       yaml_path);
+    require_known_keys(root["reid"], "reid",
+                       {"kind", "model_path", "backend", "device", "precision", "input_w", "input_h"},
+                       yaml_path);
+    require_known_keys(root["output"], "output", {"sink", "path"}, yaml_path);
+    require_known_keys(root["range"], "range",
+                       {"enabled", "smooth_window", "max_range_m", "min_depression_deg",
+                        "ground_alt_offset_m", "equiv_focal_mm", "size_priors"},
+                       yaml_path);
+    require_known_keys(root["input"], "input", {"height", "decoder"}, yaml_path);
 
     Config cfg;
     const YAML::Node d = root["detector"];
@@ -57,6 +116,8 @@ Config load_config(const std::string& yaml_path) {
     cfg.tracker.track_buffer     = get_or<int>(tr, "track_buffer", cfg.tracker.track_buffer);
     cfg.tracker.min_conf         = get_or<float>(tr, "min_conf", cfg.tracker.min_conf);
     cfg.tracker.iou_threshold    = get_or<float>(tr, "iou_threshold", cfg.tracker.iou_threshold);
+    cfg.tracker.asso_func        = get_or<std::string>(tr, "asso_func", cfg.tracker.asso_func);
+    cfg.tracker.buffer_ratio     = get_or<float>(tr, "buffer_ratio", cfg.tracker.buffer_ratio);
     cfg.tracker.new_track_thresh = get_or<float>(tr, "new_track_thresh", cfg.tracker.new_track_thresh);
     cfg.tracker.proximity_thresh = get_or<float>(tr, "proximity_thresh", cfg.tracker.proximity_thresh);
     cfg.tracker.appearance_thresh = get_or<float>(tr, "appearance_thresh", cfg.tracker.appearance_thresh);
@@ -73,6 +134,12 @@ Config load_config(const std::string& yaml_path) {
         throw std::runtime_error("load_config: tracker.type must be 'bytetrack', 'botsort' or "
                                  "'ocsort', got '" + cfg.tracker.type + "'");
     }
+    if (cfg.tracker.asso_func != "iou" && cfg.tracker.asso_func != "giou" &&
+        cfg.tracker.asso_func != "diou" && cfg.tracker.asso_func != "ciou" &&
+        cfg.tracker.asso_func != "hmiou" && cfg.tracker.asso_func != "biou") {
+        throw std::runtime_error("load_config: tracker.asso_func must be one of 'iou', 'giou', "
+                                 "'diou', 'ciou', 'hmiou', 'biou', got '" + cfg.tracker.asso_func + "'");
+    }
 
     const YAML::Node l = root["lock"];
     cfg.lock.coast_to_lost    = get_or<int>(l, "coast_to_lost", cfg.lock.coast_to_lost);
@@ -81,6 +148,7 @@ Config load_config(const std::string& yaml_path) {
     cfg.lock.verify_thresh    = get_or<float>(l, "verify_thresh", cfg.lock.verify_thresh);
     cfg.lock.reacquire_max_frac = get_or<float>(l, "reacquire_max_frac", cfg.lock.reacquire_max_frac);
     cfg.lock.reacquire_margin = get_or<float>(l, "reacquire_margin", cfg.lock.reacquire_margin);
+    cfg.lock.reacquire_thresh_single = get_or<float>(l, "reacquire_thresh_single", cfg.lock.reacquire_thresh_single);
     cfg.lock.roi_fastpath     = get_or<bool>(l, "roi_fastpath", cfg.lock.roi_fastpath);
     cfg.lock.roi_full_interval = get_or<int>(l, "roi_full_interval", cfg.lock.roi_full_interval);
     cfg.lock.roi_scale        = get_or<float>(l, "roi_scale", cfg.lock.roi_scale);
