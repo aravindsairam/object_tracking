@@ -166,9 +166,9 @@ int main(int argc, char** argv) {
             "  --display-fps N  cap display to N fps (default: source fps, max 60; 0=uncapped)\n"
             "  --zoom         show a magnified side panel of the locked target\n"
             "  --zoom-width N width of the zoom side panel in px (default: 360)\n"
-            "  --srt FILE     DJI SRT telemetry sidecar (default: auto-detect next to the video)\n"
+            "  --telemetry FILE  drone telemetry file (default: auto-detect next to the video)\n"
             "  --gimbal-pitch DEG  fixed gimbal pitch for ground-plane ranging (0=level, -90=nadir;\n"
-            "                 overrides SRT attitude; for clips with a known, held pitch)\n"
+            "                 overrides telemetry attitude; for clips with a known, held pitch)\n"
             "  keys:  click=lock  r=reset  space=pause  s=screenshot  q/ESC=quit\n",
             argv[0]);
         return 2;
@@ -185,7 +185,7 @@ int main(int argc, char** argv) {
     double display_fps = -1.0;     // -1 = match source fps (capped at 60); 0 = uncapped (benchmark)
     bool zoom = false;             // show a magnified side panel of the locked target
     int  zoom_w = 360;             // zoom side-panel width in px
-    std::string srt_override;      // --srt FILE: telemetry sidecar (else auto-detect)
+    std::string tele_override;      // --telemetry FILE (else auto-detect)
     bool   have_gimbal_pitch = false;
     double gimbal_pitch = 0.0;     // --gimbal-pitch DEG: fixed attitude for ranging
     for (int i = 2; i < argc; ++i) {
@@ -200,7 +200,7 @@ int main(int argc, char** argv) {
         else if (a == "--display-fps" && i + 1 < argc) display_fps = std::stod(argv[++i]);
         else if (a == "--zoom")                   zoom = true;
         else if (a == "--zoom-width" && i + 1 < argc) zoom_w = std::max(120, std::stoi(argv[++i]));
-        else if (a == "--srt" && i + 1 < argc)    srt_override = argv[++i];
+        else if (a == "--telemetry" && i + 1 < argc) tele_override = argv[++i];
         else if (a == "--gimbal-pitch" && i + 1 < argc) {
             gimbal_pitch = std::stod(argv[++i]);
             have_gimbal_pitch = true;
@@ -225,16 +225,16 @@ int main(int argc, char** argv) {
                     cfg.detector.class_map.c_str(), cfg.tiling.enabled ? "on" : "off");
         if (start_frame > 0) source.seek(start_frame);
 
-        // DJI SRT telemetry sidecar (drone GPS / altitude / per-frame focal;
-        // gimbal attitude on enterprise models). Auto-detected next to a file
-        // source, --srt overrides. Absence just leaves telemetry features off.
+        // Drone telemetry file (GPS / altitude / per-frame focal; gimbal attitude
+        // when the drone records it). Auto-detected next to a file
+        // source, --telemetry overrides. Absence just leaves telemetry features off.
         std::unique_ptr<ot::Telemetry> telemetry;
-        const std::string srt_path = !srt_override.empty() ? srt_override
-                                                           : ot::find_srt_sidecar(argv[1]);
-        if (!srt_path.empty()) {
+        const std::string tele_path = !tele_override.empty() ? tele_override
+                                                             : ot::find_telemetry_sidecar(argv[1]);
+        if (!tele_path.empty()) {
             try {
-                telemetry = std::make_unique<ot::Telemetry>(ot::parse_srt(srt_path));
-                std::printf("[run] telemetry: %s (%zu records%s)\n", srt_path.c_str(),
+                telemetry = std::make_unique<ot::Telemetry>(ot::parse_telemetry(tele_path));
+                std::printf("[run] telemetry: %s (%zu records%s)\n", tele_path.c_str(),
                             telemetry->size(),
                             telemetry->has_any_attitude() ? ", gimbal attitude" : "");
             } catch (const std::exception& e) {
@@ -613,7 +613,7 @@ int main(int argc, char** argv) {
                 cv::putText(df.img, hud, {12, 28}, cv::FONT_HERSHEY_SIMPLEX, 0.7, {0, 255, 0}, 2);
 
                 // Drone telemetry for THIS display frame (not the inference
-                // frame): GPS, altitude, per-frame focal, attitude if the SRT
+                // frame): GPS, altitude, per-frame focal, attitude if the telemetry
                 // carries it. Telemetry is read-only after load, so reading it
                 // here off the inference thread is safe.
                 if (telemetry) {

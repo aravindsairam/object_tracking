@@ -5,7 +5,7 @@
 #
 # PERF: cost scales with TILE COUNT, which is driven by input.height, overlap and
 # full_frame. RF-DETR is compute-bound per tile on a 3090 (~10-12 ms/tile), so
-# batching tiles does NOT speed it up — fewer tiles does. Measured on 4K DJI:
+# batching tiles does NOT speed it up — fewer tiles does. Measured on 4K drone footage:
 #   h1440 ov0.2 +full  -> ~19 tiles, ~6 fps, max recall
 #   h1080 ov0.1 nofull -> ~9 tiles, ~17 fps  (this config; ~1-2 fewer tiny dets)
 # For max recall set: height 1440, overlap 0.2, full_frame true.

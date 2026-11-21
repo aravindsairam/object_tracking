@@ -156,7 +156,7 @@ struct LockCfg {
     // eagerly (more wrong grabs); raise toward 1.0 to demand near-certain identity.
     float reacquire_thresh_single = 0.90f;
 
-    // Locked-ROI fast-path (the "DJI" lever): once a target is LOCKED, detect a
+    // Locked-ROI fast-path (the main speed lever): once a target is LOCKED, detect a
     // cropped window around its predicted position instead of running full-frame
     // SAHI every frame — far cheaper, and a tight crop is stretched up so the
     // target gets MORE detail. Full SAHI still runs periodically (and whenever
@@ -184,7 +184,7 @@ struct OutputCfg {
 };
 
 // Distance-to-target estimation for the LOCKED target (see ot::RangeEstimator).
-// Works out of the box on DJI clips with an SRT sidecar; without one, set
+// Works out of the box when the video has a drone telemetry file; without one, set
 // equiv_focal_mm to enable the size-prior method.
 struct RangeCfg {
     bool enabled = true;
@@ -205,7 +205,7 @@ struct RangeCfg {
     float max_range_m         = 10000.f;  // discard implausible fixes beyond this
     float min_depression_deg  = 1.0f;     // ground-plane: reject rays this close to horizon
     float ground_alt_offset_m = 0.0f;     // target-ground elevation vs takeoff point [m]
-    float equiv_focal_mm      = 0.0f;     // 0 = per-frame from the SRT; set a 35mm-equiv
+    float equiv_focal_mm      = 0.0f;     // 0 = per-frame from telemetry; set a 35mm-equiv
                                           // value for videos without telemetry
 };
 

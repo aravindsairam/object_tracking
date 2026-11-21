@@ -93,9 +93,9 @@ output:
   path: out/track.jsonl
 
 # Distance to the LOCKED target, shown on the reticle/zoom panel and logged to
-# the JSONL. Needs the DJI .SRT sidecar next to the video (auto-detected; or
-# --srt FILE). Methods, best available wins per frame:
-#   gp  — ground-plane ray intersection; needs gimbal attitude (enterprise-SRT
+# the JSONL. Needs the drone telemetry file next to the video (auto-detected;
+# or --telemetry FILE). Methods, best available wins per frame:
+#   gp  — ground-plane ray intersection; needs gimbal attitude (telemetry
 #         gb_pitch, or --gimbal-pitch DEG for a clip with a known fixed pitch).
 #   est — class-size prior (typical car/person/... size vs box size); no
 #         attitude needed, ~10-15% accuracy, tagged "(est)" in the overlay.
@@ -108,4 +108,4 @@ range:
   # max_range_m: 10000       # discard implausible fixes beyond this
   # min_depression_deg: 1.0  # gp: reject rays this close to the horizon
   # ground_alt_offset_m: 0   # gp/est: target-ground elevation vs takeoff [m]
-  # equiv_focal_mm: 0        # set (35mm equiv) to enable est on SRT-less videos
+  # equiv_focal_mm: 0        # set (35mm equiv) to enable est without telemetry

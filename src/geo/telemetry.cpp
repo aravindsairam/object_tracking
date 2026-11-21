@@ -1,6 +1,6 @@
-// DJI SRT sidecar parsing. Each subtitle block carries one frame's telemetry as
-// "[key: value]" fields; Mavic Fly-app SRTs provide GPS/altitude/focal only,
-// enterprise SRTs (M30/M300/M350) add gb_yaw/gb_pitch/gb_roll gimbal attitude.
+// Drone telemetry file parsing. Each subtitle block carries one frame's telemetry
+// as "[key: value]" fields: GPS/altitude/focal always, plus gb_yaw/gb_pitch/
+// gb_roll gimbal attitude on drones that record it.
 // The 35mm-equivalent focal_len is per frame, so zoom ramps are captured.
 #include "ot/telemetry.hpp"
 
@@ -68,9 +68,9 @@ bool parse_block(const std::string& text, TeleFrame& out) {
 }
 }  // namespace
 
-std::vector<TeleFrame> parse_srt(const std::string& path) {
+std::vector<TeleFrame> parse_telemetry(const std::string& path) {
     std::ifstream in(path);
-    if (!in) throw std::runtime_error("parse_srt: cannot open '" + path + "'");
+    if (!in) throw std::runtime_error("parse_telemetry: cannot open '" + path + "'");
 
     std::vector<TeleFrame> frames;
     std::string line, block;
@@ -87,11 +87,11 @@ std::vector<TeleFrame> parse_srt(const std::string& path) {
     }
     flush();
     if (frames.empty())
-        throw std::runtime_error("parse_srt: no telemetry blocks in '" + path + "'");
+        throw std::runtime_error("parse_telemetry: no telemetry blocks in '" + path + "'");
     return frames;
 }
 
-std::string find_srt_sidecar(const std::string& video_path) {
+std::string find_telemetry_sidecar(const std::string& video_path) {
     std::error_code ec;
     if (!std::filesystem::is_regular_file(video_path, ec)) return "";
     std::filesystem::path p(video_path);

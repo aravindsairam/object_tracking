@@ -13,7 +13,7 @@ struct SwsContext;
 
 namespace ot {
 
-// Hardware video decode via FFmpeg libavcodec + NVIDIA cuvid (NVDEC). Decodes
+// Hardware video decode via FFmpeg libavcodec + cuvid (NVDEC). Decodes
 // H.264/HEVC/AV1/VP9 files & RTSP streams on the GPU, GPU-resizes to the working
 // resolution during decode (cuvid `resize` option), and returns BGR frames.
 // Throws std::runtime_error from the constructor if NVDEC cannot be used for
