@@ -86,7 +86,7 @@ RangeEstimate RangeEstimator::ground_plane(const TargetState& t, const TeleFrame
                                            double f_px) const {
     RangeEstimate est;
 
-    // Attitude precedence: static --gimbal-pitch > per-frame SRT gb_*.
+    // Attitude precedence: static --gimbal-pitch > per-frame telemetry gb_*.
     double pitch = 0.0, roll = 0.0;
     if (have_static_pitch_) {
         pitch = static_pitch_deg_;

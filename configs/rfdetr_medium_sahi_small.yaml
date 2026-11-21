@@ -18,7 +18,7 @@
 # PERF: cost scales with TILE COUNT (driven by tile size, input.height, overlap),
 # and RF-DETR is compute-bound per tile (~10-12 ms/tile on a 3090; batching does
 # NOT help). This config produces roughly 3x the tiles of the fast one -> expect
-# single-digit fps on 4K DJI. The locked-ROI fast-path still applies once locked,
+# single-digit fps on 4K drone footage. The locked-ROI fast-path still applies once locked,
 # so full SAHI only runs every roi_full_interval frames while a target is held.
 detector:
   family:     rfdetr

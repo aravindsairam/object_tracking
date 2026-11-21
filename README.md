@@ -4,7 +4,7 @@
 
 Click a person or vehicle in a drone video and SkyLock stays locked on it through
 camera motion, short occlusions and look-alikes nearby. If it truly loses the
-target it says so, instead of drifting onto something else. With DJI telemetry it
+target it says so, instead of drifting onto something else. With drone telemetry it
 also estimates the distance to the target. Real-time C++ on NVIDIA GPUs.
 
 ## Demo
@@ -15,7 +15,7 @@ also estimates the distance to the target. Real-time C++ on NVIDIA GPUs.
 
 <video src="https://github.com/user-attachments/assets/14598d87-b5f9-4de1-a26a-2b1b47fa4dc0" controls muted loop width="800"></video>
 
-**With live distance** from the DJI `.SRT` file next to the video:
+**With live distance** from the drone's telemetry:
 
 <video src="https://github.com/user-attachments/assets/70cd8431-bad0-43e9-8f0f-f4f751b7e86a" controls muted loop width="800"></video>
 
@@ -35,7 +35,7 @@ also estimates the distance to the target. Real-time C++ on NVIDIA GPUs.
   tiny objects at full resolution.
 - **Fast once locked.** Only a small crop around the target is searched; the full
   frame is re-checked every 20 frames.
-- **Distance to the target** from DJI telemetry ([details](#distance-to-the-target)).
+- **Distance to the target** from drone telemetry ([details](#distance-to-the-target)).
 - **Swappable models.** RF-DETR, YOLO, WALDO or UniDrone, on ONNX Runtime or
   TensorRT, chosen in a YAML file.
 - **Per-frame record.** Optional JSON line per frame: box, velocity, state, distance.
@@ -89,7 +89,7 @@ to the first `cmake`.
 | `--start N` | Start at frame N |
 | `--height N` | Working resolution (lower = faster, higher = more small-object detail) |
 | `--profile` | Print timing every 120 frames |
-| `--srt FILE` | DJI telemetry file (default: `<video>.SRT` next to the video) |
+| `--telemetry FILE` | Drone telemetry file (default: found automatically next to the video) |
 | `--gimbal-pitch DEG` | Fixed camera pitch for distance (0 = level, -90 = straight down) |
 
 Run with no arguments for the full list.
@@ -128,26 +128,26 @@ clearly the best match.
 
 ## Distance to the target
 
-Keep the DJI `.SRT` subtitle file next to the video (or pass `--srt`). The overlay
-then shows the drone's GPS, altitude and focal length, plus a distance to the locked
-target:
+Keep the telemetry file your drone saves with each video next to it, with the same
+name (or pass `--telemetry FILE`). The overlay then shows the drone's GPS, altitude
+and focal length, plus a distance to the locked target:
 
 | Shown as | Method | Needs |
 |---|---|---|
-| `~143m` | Ray from the camera to the target's ground contact point, intersected with flat ground | Camera pitch: from enterprise DJI SRTs (M30/M300/M350) or `--gimbal-pitch` |
-| `~143m(est)` | Known typical size of the class (car ≈ 4.6 m, person ≈ 1.7 m) vs its size on screen | Only the SRT (works with consumer DJI drones) |
+| `~143m` | Ray from the camera to the target's ground contact point, intersected with flat ground | Camera pitch: from telemetry that records the gimbal, or `--gimbal-pitch` |
+| `~143m(est)` | Known typical size of the class (car ≈ 4.6 m, person ≈ 1.7 m) vs its size on screen | Only basic telemetry (GPS, altitude, focal length) |
 
 <details>
 <summary>Accuracy and limits</summary>
 
-- Zoom changes mid-clip are handled: the focal length is read per frame from the SRT.
+- Zoom changes mid-clip are handled: the focal length is read per frame from the telemetry.
 - Values are median-smoothed; implausible results (near the horizon, beyond
   `range.max_range_m`) are hidden rather than shown wrong. `LOST` targets get none.
 - `(est)` is roughly ±10–15 %. Ground-plane accuracy depends on the pitch value and
   on altitude being relative to the take-off point; set `range.ground_alt_offset_m`
   if the target's ground is higher or lower than the take-off spot.
-- No SRT at all? Set `range.equiv_focal_mm` to use the size method on any footage.
-- Check the maths without a GPU: `./build/test_range [flight.SRT]`.
+- No telemetry at all? Set `range.equiv_focal_mm` to use the size method on any footage.
+- Check the maths without a GPU: `./build/test_range [telemetry_file]`.
 
 </details>
 

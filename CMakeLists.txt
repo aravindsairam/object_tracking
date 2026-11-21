@@ -159,7 +159,7 @@ set_target_properties(test_config PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
-# Logic-only unit test for SRT telemetry parsing + locked-target range estimation.
+# Logic-only unit test for drone telemetry parsing + locked-target range estimation.
 add_executable(test_range tools/test_range.cpp)
 target_link_libraries(test_range PRIVATE ot_core)
 target_link_options(test_range PRIVATE -Wl,--disable-new-dtags)

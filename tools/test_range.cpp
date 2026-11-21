@@ -1,9 +1,9 @@
 // Logic-only tests for the telemetry + range-estimation stack (no video/GPU):
-// SRT parsing (Mavic and enterprise gb_* variants, CRLF, zoom ramp), sidecar
+// telemetry parsing (basic and gb_* attitude variants, CRLF, zoom ramp), sidecar
 // detection, per-frame lookup clamping, and the RangeEstimator method chain
-// (size-prior math, smoothing, resets, guards). Optionally parses a real SRT.
+// (size-prior math, smoothing, resets, guards). Optionally parses a real telemetry file.
 //
-//   ./build/test_range [path/to/DJI_xxxx.SRT]
+//   ./build/test_range [path/to/telemetry_file]
 #include "ot/range_estimator.hpp"
 #include "ot/telemetry.hpp"
 
@@ -64,11 +64,11 @@ ot::TeleFrame tele_frame(double focal_mm, double rel_alt) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::printf("== SRT parsing: Mavic Fly-app format (no attitude) ==\n");
+    std::printf("== telemetry parsing: basic format (no attitude) ==\n");
     {
-        // Two blocks in the real Mavic 4 Pro layout, CRLF line endings, with a
+        // Two blocks in a real consumer-drone layout, CRLF line endings, with a
         // zoom ramp (70 -> 168 mm) across frames.
-        const std::string srt =
+        const std::string tele =
             "1\r\n"
             "00:00:00,000 --> 00:00:00,016\r\n"
             "<font size=\"28\">FrameCnt: 1, DiffTime: 16ms\r\n"
@@ -84,7 +84,7 @@ int main(int argc, char** argv) {
             "[iso: 100] [focal_len: 168.00] [latitude: 52.150960] [longitude: 21.094027] "
             "[rel_alt: 64.100 abs_alt: 181.400] </font>\r\n"
             "\r\n";
-        const auto frames = ot::parse_srt(write_temp("ot_test_mavic.srt", srt));
+        const auto frames = ot::parse_telemetry(write_temp("ot_test_tele_basic.txt", tele));
         check("two records", frames.size() == 2);
         if (frames.size() == 2) {
             const auto& f0 = frames[0];
@@ -94,13 +94,13 @@ int main(int argc, char** argv) {
             check("rel/abs alt", near(f0.rel_alt, 63.928) && near(f0.abs_alt, 181.211));
             check("zoom ramp per frame", f0.has_focal && near(f0.focal_len, 70.0) &&
                                           near(frames[1].focal_len, 168.0));
-            check("no attitude in Fly-app SRT", !f0.has_attitude && !frames[1].has_attitude);
+            check("no attitude in basic telemetry", !f0.has_attitude && !frames[1].has_attitude);
         }
     }
 
-    std::printf("== SRT parsing: enterprise format (gb_* attitude) ==\n");
+    std::printf("== telemetry parsing: with gimbal attitude (gb_*) ==\n");
     {
-        const std::string srt =
+        const std::string tele =
             "1\n"
             "00:00:00,000 --> 00:00:00,033\n"
             "<font size=\"28\">FrameCnt: 1, DiffTime: 33ms\n"
@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
             "[rel_alt: 50.000 abs_alt: 150.000] "
             "[gb_yaw: -12.3 gb_pitch: -45.6 gb_roll: 0.4] </font>\n"
             "\n";
-        const auto frames = ot::parse_srt(write_temp("ot_test_ent.srt", srt));
+        const auto frames = ot::parse_telemetry(write_temp("ot_test_tele_gimbal.txt", tele));
         check("record parses", frames.size() == 1);
         if (frames.size() == 1) {
             const auto& f = frames[0];
@@ -134,17 +134,17 @@ int main(int argc, char** argv) {
     std::printf("== Sidecar detection ==\n");
     {
         check("missing video -> no sidecar",
-              ot::find_srt_sidecar("/nonexistent/video.mp4").empty());
-        // A real video file with an .SRT next to it must resolve; simulate one.
+              ot::find_telemetry_sidecar("/nonexistent/video.mp4").empty());
+        // A real video file with a telemetry file next to it must resolve; simulate one.
         const auto dir = std::filesystem::temp_directory_path();
         const std::string vid = (dir / "ot_test_clip.MP4").string();
-        const std::string srt = (dir / "ot_test_clip.SRT").string();
+        const std::string tele = (dir / "ot_test_clip.SRT").string();
         std::ofstream(vid) << "x";
-        std::ofstream(srt) << "x";
-        check("finds .SRT next to video", ot::find_srt_sidecar(vid) == srt,
-              ot::find_srt_sidecar(vid));
+        std::ofstream(tele) << "x";
+        check("finds telemetry file next to video", ot::find_telemetry_sidecar(vid) == tele,
+              ot::find_telemetry_sidecar(vid));
         check("rtsp url -> no sidecar",
-              ot::find_srt_sidecar("rtsp://cam/stream").empty());
+              ot::find_telemetry_sidecar("rtsp://cam/stream").empty());
     }
 
     std::printf("== RangeEstimator: size-prior method ==\n");
@@ -177,13 +177,13 @@ int main(int argc, char** argv) {
         check("no telemetry -> none",
               est3.update(locked_target(2, 100.0f), nullptr).method == ot::RangeMethod::None);
 
-        // equiv_focal_mm override enables the size branch without any SRT:
+        // equiv_focal_mm override enables the size branch without any telemetry:
         // f_px = 70/36*1920 = 3733.33; a 1.7m person at 21.156px sits at 300m.
         ot::RangeCfg cfg_f = cfg;
         cfg_f.equiv_focal_mm = 70.0f;
         ot::RangeEstimator est4(cfg_f, 1920, 1080, cmap);
         const auto rf = est4.update(locked_target(0, 21.1556f), nullptr);
-        check("focal override works without SRT",
+        check("focal override works without telemetry",
               rf.method == ot::RangeMethod::SizePrior && near(rf.slant_m, 300.0, 0.05),
               std::to_string(rf.slant_m));
         check("ground unknown without altitude", rf.ground_m < 0.0f);
@@ -277,13 +277,13 @@ int main(int argc, char** argv) {
               near(r60.ground_m, 100.0 / std::tan(60.0 * M_PI / 180.0), 0.05),
               std::to_string(r60.slant_m) + " / " + std::to_string(r60.ground_m));
 
-        // SRT gb_* attitude drives gp without any static pitch...
+        // telemetry gb_* attitude drives gp without any static pitch...
         ot::TeleFrame tf_att = tf;
         tf_att.has_attitude = true;
         tf_att.gb_pitch = -45.0;
-        ot::RangeEstimator srt_att(cfg, 1920, 1080, cmap);
-        const auto ra = srt_att.update(target_at(960.0f, 540.0f), &tf_att);
-        check("SRT attitude -> gp", ra.method == ot::RangeMethod::GroundPlane &&
+        ot::RangeEstimator tele_att(cfg, 1920, 1080, cmap);
+        const auto ra = tele_att.update(target_at(960.0f, 540.0f), &tf_att);
+        check("telemetry attitude -> gp", ra.method == ot::RangeMethod::GroundPlane &&
                                      near(ra.slant_m, 141.4214, 0.01));
         // ...and roll about the optical axis leaves the center ray unchanged.
         ot::TeleFrame tf_roll = tf_att;
@@ -292,14 +292,14 @@ int main(int argc, char** argv) {
         const auto rr = rolled.update(target_at(960.0f, 540.0f), &tf_roll);
         check("roll leaves the center ray unchanged", near(rr.slant_m, 141.4214, 0.01));
 
-        // --gimbal-pitch overrides the SRT attitude.
+        // --gimbal-pitch overrides the telemetry attitude.
         ot::TeleFrame tf_bad = tf;
         tf_bad.has_attitude = true;
         tf_bad.gb_pitch = -10.0;
         ot::RangeEstimator prefer_static(cfg, 1920, 1080, cmap);
         prefer_static.set_static_pitch(-45.0f);
         const auto rp = prefer_static.update(target_at(960.0f, 540.0f), &tf_bad);
-        check("static pitch beats SRT attitude", near(rp.slant_m, 141.4214, 0.01),
+        check("static pitch beats telemetry attitude", near(rp.slant_m, 141.4214, 0.01),
               std::to_string(rp.slant_m));
 
         // Guards fall through to the size prior (car box -> est, not gp):
@@ -329,7 +329,7 @@ int main(int argc, char** argv) {
               both.update(target_at(960.0f, 540.0f, /*car*/ 2), &tf).method ==
                   ot::RangeMethod::GroundPlane);
 
-        // Method change (est -> gp via appearing SRT attitude) resets the
+        // Method change (est -> gp via appearing telemetry attitude) resets the
         // median window, so the first gp value stands alone.
         ot::RangeEstimator sw(cfg, 1920, 1080, cmap);
         sw.update(locked_target(2, 137.3867f), &tf);       // est ~300m
@@ -341,9 +341,9 @@ int main(int argc, char** argv) {
     }
 
     if (argc > 1) {
-        std::printf("== real SRT: %s ==\n", argv[1]);
+        std::printf("== real telemetry file: %s ==\n", argv[1]);
         try {
-            const auto frames = ot::parse_srt(argv[1]);
+            const auto frames = ot::parse_telemetry(argv[1]);
             const auto& f0 = frames.front();
             const auto& fN = frames.back();
             char d[256];
@@ -353,12 +353,12 @@ int main(int argc, char** argv) {
                           frames.size(), f0.frame, f0.time.c_str(), f0.lat, f0.lon,
                           f0.rel_alt, f0.focal_len, f0.has_attitude ? 1 : 0,
                           fN.frame, fN.focal_len);
-            check("SRT parses", !frames.empty(), d);
+            check("telemetry file parses", !frames.empty(), d);
             check("first record has GPS + focal", f0.has_gps && f0.has_focal);
             check("FrameCnt is 1-based and contiguous",
                   f0.frame == 1 && fN.frame == static_cast<int>(frames.size()));
         } catch (const std::exception& e) {
-            check("SRT parses", false, e.what());
+            check("telemetry file parses", false, e.what());
         }
     }
 

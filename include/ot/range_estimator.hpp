@@ -23,8 +23,8 @@ struct RangeEstimate {
 //   GroundPlane — cast the pixel ray through the box's BOTTOM-CENTER (the
 //   ground contact point), rotate it by the gimbal attitude (yaw is irrelevant
 //   for range), intersect the flat ground plane: slant = height / -ray_z.
-//   Attitude precedence: set_static_pitch() (--gimbal-pitch) > SRT gb_pitch/
-//   gb_roll (enterprise DJI). Needs a positive camera height above the target
+//   Attitude precedence: set_static_pitch() (--gimbal-pitch) > telemetry
+//   gb_pitch/gb_roll. Needs a positive camera height above the target
 //   ground (rel_alt - ground_alt_offset_m). Falls through when the ray misses
 //   the ground usefully (above horizon, < min_depression_deg, > max_range_m).
 //
@@ -44,10 +44,10 @@ public:
                    const ClassMap& class_map);
 
     // Fixed gimbal pitch [deg] for the whole clip (0 = level, -90 = nadir);
-    // overrides any per-frame SRT attitude. For clips with a known, held pitch.
+    // overrides any per-frame telemetry attitude. For clips with a known, held pitch.
     void set_static_pitch(float pitch_deg);
 
-    // tele may be null (no SRT record for this frame / no sidecar at all).
+    // tele may be null (no telemetry record for this frame / no file at all).
     RangeEstimate update(const TargetState& target, const TeleFrame* tele);
 
     // Forget the smoothing window (lock reset / loop restart).
