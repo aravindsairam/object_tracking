@@ -8,6 +8,7 @@
 #include "ot/overlay.hpp"
 #include "ot/range_estimator.hpp"
 #include "ot/reid.hpp"
+#include "ot/roi.hpp"
 #include "ot/selector.hpp"
 #include "ot/target_sink.hpp"
 #include "ot/telemetry.hpp"
@@ -120,28 +121,6 @@ struct SharedResult {
         return true;
     }
 };
-
-// Predicted search window around the locked target for the ROI fast-path: a
-// square centered on the target's next position (current center advanced by one
-// frame of its velocity), sized to `scale` x the target's largest dimension and
-// clamped to the frame. A tight crop is fine — the detector stretches it up to
-// the network input, so a small/distant target actually gains detail.
-cv::Rect predict_roi(const ot::TargetState& t, float scale, double fps, int W, int H) {
-    cv::Point2f c = t.center_px;
-    if (fps > 0) {
-        c.x += t.velocity_px_s.x / static_cast<float>(fps);
-        c.y += t.velocity_px_s.y / static_cast<float>(fps);
-    }
-    float side = scale * std::max(t.box.w, t.box.h);
-    side = std::max(side, 320.0f);                              // floor: search margin + context
-    side = std::min(side, static_cast<float>(std::min(W, H)));  // never exceed the frame
-    const int half = static_cast<int>(side * 0.5f);
-    const int x0 = std::max(0, static_cast<int>(c.x) - half);
-    const int y0 = std::max(0, static_cast<int>(c.y) - half);
-    const int x1 = std::min(W, static_cast<int>(c.x) + half);
-    const int y1 = std::min(H, static_cast<int>(c.y) + half);
-    return cv::Rect(x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0));
-}
 
 // UI -> inference command channel. The window/mouse/keys live on the main
 // (display) thread, but the lock state lives on the inference thread, so clicks
@@ -469,7 +448,7 @@ int main(int argc, char** argv) {
 
                     t0 = std::chrono::steady_clock::now();
                     if (use_roi) {
-                        const cv::Rect roi = predict_roi(last_target, cfg.lock.roi_scale, fps, W, H);
+                        const cv::Rect roi = ot::predict_roi(last_target, cfg.lock.roi_scale, fps, W, H);
                         std::lock_guard<std::mutex> g(det_mutex);
                         auto local = detector->detect(in.img(roi));
                         dets.reserve(local.size());
