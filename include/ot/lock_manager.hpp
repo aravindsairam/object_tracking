@@ -31,9 +31,15 @@ public:
     // `reacquire_margin` is how far the best candidate's appearance cosine must beat
     // the runner-up's to re-acquire — refuses an ambiguous match when two nearby
     // objects look almost equally like the target (don't bind a coin-flip).
+    // `reacquire_thresh_single` is the STRICTER absolute cosine required to re-acquire
+    // when there is NO runner-up: a lone candidate has nothing proving it is the
+    // target (vs just some object that drifted into range), and `reacquire_margin`
+    // cannot apply, so it must clear a high absolute bar or we stay LOST for a
+    // re-click. Guards the confirmed wrong-object grab (best≈0.86, no runner-up).
     LockManager(double fps, int coast_to_lost, float reacquire_thresh,
                 std::shared_ptr<ReidEmbedder> reid, float verify_thresh = 0.35f,
-                float reacquire_max_frac = 0.2f, float reacquire_margin = 0.10f);
+                float reacquire_max_frac = 0.2f, float reacquire_margin = 0.10f,
+                float reacquire_thresh_single = 0.90f);
 
     // Locks onto the track under (or nearest to) `click` and stores its
     // appearance template from `frame`. No-op if no track is close.
@@ -62,6 +68,7 @@ private:
     float        verify_thresh_;
     float        reacquire_max_frac_;
     float        reacquire_margin_;
+    float        reacquire_thresh_single_;   // strict bar when there is no runner-up
     std::shared_ptr<ReidEmbedder> reid_;
 
     int          locked_id_ = -1;

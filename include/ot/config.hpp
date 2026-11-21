@@ -55,6 +55,31 @@ struct TrackerCfg {
                                  // boxes can move >1 box-width/frame at high fps, dropping IoU
                                  // to ~0 even for the right match — lower this (e.g. 0.2) if
                                  // small targets fragment; raise it to reject clutter matches.
+    std::string asso_func = "iou";  // association metric (all trackers): how box-to-box similarity
+                                 // is scored before the iou_threshold gate. Options:
+                                 //   iou   - plain IoU. Default; identical to previous behavior.
+                                 //   diou  - IoU minus normalized center distance. Rewards boxes
+                                 //           whose CENTERS stay close even when overlap drops to ~0
+                                 //           -> built for small/fast aerial targets that jump
+                                 //           >1 box-width/frame. The natural fit for this case.
+                                 //   biou  - Buffered IoU: inflate every box by buffer_ratio (below)
+                                 //           then plain IoU. Small/fast boxes that just miss now
+                                 //           overlap -> stay associated. C-BIoU's core mechanism;
+                                 //           buffer_ratio is the main knob to tune.
+                                 //   giou  - IoU penalized by enclosing-box slack (helps occlusion).
+                                 //   ciou  - diou + an aspect-ratio consistency term.
+                                 //   hmiou - height-modified IoU (weights vertical overlap).
+                                 // giou/diou/ciou are internally rescaled to [0,1], so iou_threshold
+                                 // applies to that rescaled score: diou 0.3 is MORE permissive than
+                                 // iou 0.3 for nearby non-overlapping boxes — which is the intended
+                                 // help. If matches get too loose, raise iou_threshold (e.g. 0.5).
+                                 // (biou stays in [0,1] without rescaling but is likewise more
+                                 // permissive the larger buffer_ratio is.)
+    float buffer_ratio = 0.3f;   // box inflation for asso_func: biou ONLY (ignored otherwise). Each
+                                 // box grows w->(1+2*r)*w, h->(1+2*r)*h about its center before IoU.
+                                 // 0.3 (paper default) is small for aerial; a ~1-box-width jump needs
+                                 // r~0.5 to overlap. Sweep 0.3->1.0; pair larger r with a higher
+                                 // iou_threshold to avoid nearby-target id hopping.
 
     // BoT-SORT only. Ignored when type: bytetrack.
     float new_track_thresh  = 0.6f;   // min confidence to spawn a brand-new id.
@@ -121,6 +146,15 @@ struct LockCfg {
     // look almost equally like the target. Higher = stricter (won't gamble on a
     // coin-flip; stays LOST for a re-click instead).
     float reacquire_margin = 0.10f;
+
+    // Stricter absolute cosine required to re-acquire when there is NO runner-up.
+    // A lone candidate that drifts within range is not proof of identity, and the
+    // margin guard above cannot apply — so it must clear this high bar or we stay
+    // LOST for a re-click. Guards the wrong-object grab where a single ~0.86 object
+    // bound the lock after a full miss (reacquire_thresh alone was too low). Must be
+    // >= reacquire_thresh (clamped). Lower toward reacquire_thresh to re-acquire more
+    // eagerly (more wrong grabs); raise toward 1.0 to demand near-certain identity.
+    float reacquire_thresh_single = 0.90f;
 
     // Locked-ROI fast-path (the "DJI" lever): once a target is LOCKED, detect a
     // cropped window around its predicted position instead of running full-frame
