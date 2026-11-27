@@ -15,8 +15,13 @@ namespace ot {
 YoloDetector::YoloDetector(const DetectorCfg& cfg)
     : cfg_(cfg),
       class_map_(ClassMap::preset(cfg.class_map)),
+      // TRT optimization profile (TensorRT backend only; ignored otherwise): one
+      // engine for batch 1 (locked ROI) .. 16 (SAHI tiles), tuned for 8. Needs a
+      // dynamic-batch ONNX; Ultralytics names the input "images".
       backend_(make_backend(cfg.backend, cfg.model_path, cfg.device,
-                            cfg.precision, cfg.int8_calib)) {}
+                            cfg.precision, cfg.int8_calib,
+                            TrtProfile{"images", 3, cfg.input_size, cfg.input_size,
+                                       1, 8, 16})) {}
 
 float YoloDetector::letterbox(const cv::Mat& frame, cv::Mat& out) const {
     const int s = cfg_.input_size;
