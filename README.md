@@ -125,10 +125,17 @@ recommended one. Unknown or misspelled keys are rejected with an error.
 ```
 video ─▶ decode ─▶ detect objects ─▶ track IDs ─▶ lock + appearance check ─▶ overlay + JSONL
          (NVDEC)   (tiled, TensorRT)  (OC-SORT)    (LOCKED / COASTING / LOST)
+                                                              │
+drone telemetry ──────────────────────────────────────────────┴─▶ distance ─▶ position ─▶ map
+(file next to the video + the video's own metadata track)
 ```
 
 Capture, inference and display run on separate threads, so playback stays smooth
 even when a frame takes longer to process.
+
+When the video comes with drone telemetry, the locked box is also turned into a
+[distance](#distance-to-the-target) and a [position on the map](#target-on-the-map).
+Map tiles load on their own background thread, so the display never waits for them.
 
 The hard part is staying on the *right* object. Trackers sometimes hand an ID to
 a different object, so a matching ID is never trusted on its own: the target must
