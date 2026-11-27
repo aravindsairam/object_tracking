@@ -69,9 +69,11 @@ venv/
 env/
 
 # ─────────────────────────────────────────────────────────────
-# Docs (design notes, plans, specs — kept local)
+# Docs (design notes, plans, specs, reviews — kept local)
 # ─────────────────────────────────────────────────────────────
 docs/
+reports/
+research_notes/
 
 # ─────────────────────────────────────────────────────────────
 # Editor / IDE / OS
