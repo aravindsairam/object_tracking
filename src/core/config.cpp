@@ -1,5 +1,5 @@
 // YAML -> Config loader. One flat function reads each section (detector /
-// tiling / tracker / lock / reid / input / output / range) via get_or, so any
+// tiling / tracker / lock / reid / input / output / range / map) via get_or, so any
 // missing key falls back to the default already set on the Config struct.
 // Unknown sections and keys are REJECTED (a typo or a key this build does not
 // understand must not load silently and run the defaults). Beyond that only the
@@ -59,7 +59,8 @@ Config load_config(const std::string& yaml_path) {
     // Strict schema: every section and key this loader reads, and nothing else.
     // Keep these lists in sync with the get_or calls below.
     require_known_keys(root, "<top level>",
-                       {"detector", "tiling", "tracker", "lock", "reid", "output", "range", "input"},
+                       {"detector", "tiling", "tracker", "lock", "reid", "output", "range", "input",
+                        "map"},
                        yaml_path);
     require_known_keys(root["detector"], "detector",
                        {"family", "model_path", "backend", "device", "precision", "int8_calib",
@@ -84,7 +85,12 @@ Config load_config(const std::string& yaml_path) {
     require_known_keys(root["output"], "output", {"sink", "path"}, yaml_path);
     require_known_keys(root["range"], "range",
                        {"enabled", "smooth_window", "max_range_m", "min_depression_deg",
-                        "ground_alt_offset_m", "equiv_focal_mm", "size_priors"},
+                        "ground_alt_offset_m", "equiv_focal_mm", "size_priors",
+                        "heading_offset_deg"},
+                       yaml_path);
+    require_known_keys(root["map"], "map",
+                       {"tile_url", "attribution", "user_agent", "cache_dir", "offline",
+                        "default_zoom", "max_zoom", "min_zoom"},
                        yaml_path);
     require_known_keys(root["input"], "input", {"height", "decoder"}, yaml_path);
 
@@ -176,10 +182,28 @@ Config load_config(const std::string& yaml_path) {
     cfg.range.min_depression_deg  = get_or<float>(rg, "min_depression_deg", cfg.range.min_depression_deg);
     cfg.range.ground_alt_offset_m = get_or<float>(rg, "ground_alt_offset_m", cfg.range.ground_alt_offset_m);
     cfg.range.equiv_focal_mm      = get_or<float>(rg, "equiv_focal_mm", cfg.range.equiv_focal_mm);
+    cfg.range.heading_offset_deg  = get_or<float>(rg, "heading_offset_deg", cfg.range.heading_offset_deg);
     if (rg && rg["size_priors"]) {  // merged over the defaults, not replacing them
         for (const auto& kv : rg["size_priors"])
             cfg.range.size_priors[kv.first.as<std::string>()] = kv.second.as<float>();
     }
+
+    const YAML::Node mp = root["map"];
+    cfg.map.tile_url     = get_or<std::string>(mp, "tile_url", cfg.map.tile_url);
+    cfg.map.attribution  = get_or<std::string>(mp, "attribution", cfg.map.attribution);
+    cfg.map.user_agent   = get_or<std::string>(mp, "user_agent", cfg.map.user_agent);
+    cfg.map.cache_dir    = get_or<std::string>(mp, "cache_dir", cfg.map.cache_dir);
+    cfg.map.offline      = get_or<bool>(mp, "offline", cfg.map.offline);
+    cfg.map.default_zoom = get_or<int>(mp, "default_zoom", cfg.map.default_zoom);
+    cfg.map.max_zoom     = get_or<int>(mp, "max_zoom", cfg.map.max_zoom);
+    cfg.map.min_zoom     = get_or<int>(mp, "min_zoom", cfg.map.min_zoom);
+    if (cfg.map.tile_url.find("{z}") == std::string::npos ||
+        cfg.map.tile_url.find("{x}") == std::string::npos ||
+        cfg.map.tile_url.find("{y}") == std::string::npos)
+        throw std::runtime_error("load_config: map.tile_url must contain {z}, {x} and {y}");
+    if (cfg.map.min_zoom < 0 || cfg.map.max_zoom > 22 || cfg.map.min_zoom > cfg.map.max_zoom)
+        throw std::runtime_error("load_config: map zoom range must satisfy 0 <= min_zoom <= max_zoom <= 22");
+    cfg.map.default_zoom = std::min(cfg.map.max_zoom, std::max(cfg.map.min_zoom, cfg.map.default_zoom));
 
     cfg.work_height = get_or<int>(root["input"], "height", cfg.work_height);
     cfg.decoder     = get_or<std::string>(root["input"], "decoder", cfg.decoder);

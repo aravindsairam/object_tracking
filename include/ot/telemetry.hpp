@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -18,9 +19,15 @@ struct TeleFrame {
     double      gb_yaw = 0;         // gimbal attitude [deg] (0 level, -90 nadir);
     double      gb_pitch = 0;       // only present when the drone records it
     double      gb_roll = 0;
+    double      body_yaw = 0;       // airframe compass heading [deg CW from north]
+    double      heading = 0;        // CAMERA optical-axis compass heading [deg CW from
+                                    // north]; filled by resolve_heading(), not the parsers
     bool        has_gps = false;
     bool        has_focal = false;
     bool        has_attitude = false;   // gb_pitch was present in the record
+    bool        has_gb_yaw = false;     // gb_yaw was present (its zero may be arbitrary)
+    bool        has_body_yaw = false;
+    bool        has_heading = false;
 };
 
 // Parses a drone telemetry file. Throws std::runtime_error if no records parse.
@@ -29,6 +36,44 @@ std::vector<TeleFrame> parse_telemetry(const std::string& path);
 // Returns the path of the telemetry file saved next to the video (same name),
 // or "" if none (also "" for non-file sources like RTSP/camera indices).
 std::string find_telemetry_sidecar(const std::string& video_path);
+
+// ---- Embedded camera-metadata track ----------------------------------------
+// Some cameras store a per-frame metadata data stream inside the video file
+// itself (one packet per video frame). It carries what the sidecar text file
+// leaves out: airframe heading and gimbal attitude, plus GPS and altitude.
+
+// Decodes ONE metadata packet into `out` (GPS, altitudes, gb_*, body_yaw and
+// their has_* flags; nothing else is touched). Returns false when the packet
+// holds none of those. Pure function, safe on arbitrary bytes.
+bool decode_embedded_packet(const uint8_t* data, size_t size, TeleFrame& out);
+
+// Reads the whole embedded metadata track of a video file: record i belongs to
+// video frame i (frame = i + 1). Returns {} when the file has no such track or
+// it cannot be read — never throws. Only the metadata stream is read from disk.
+std::vector<TeleFrame> parse_embedded_telemetry(const std::string& video_path);
+
+// Fills fields that `base` lacks from `extra`, record by record (same frame
+// index). `base` wins wherever it already has a value; an empty `base` becomes
+// a copy of `extra`. Records past the shorter list are left as they are.
+void merge_telemetry(std::vector<TeleFrame>& base, const std::vector<TeleFrame>& extra);
+
+// How resolve_heading() obtained the camera heading.
+struct HeadingInfo {
+    enum class Source { None, GimbalPlusOffset, GimbalYaw, BodyYaw } source = Source::None;
+    double offset_deg = 0.0;    // added to gb_yaw (GimbalPlusOffset / GimbalYaw)
+    bool   offset_auto = false; // offset was measured from the clip, not given
+    size_t frames = 0;          // records that ended up with a heading
+};
+
+// Fills TeleFrame::heading / has_heading for every record, best source first:
+//   gb_yaw + offset — the gimbal yaw is the stabilised direction the picture
+//     actually follows, but its zero can differ from north. The offset is
+//     `offset_override_deg` when finite; otherwise, when the records also carry
+//     body_yaw, it is measured as the robust circular mean of
+//     (body_yaw - gb_yaw) over the clip (i.e. "on average the camera faces the
+//     way the airframe does"); with no body_yaw to compare against it is 0.
+//   body_yaw — records that have no gimbal yaw.
+HeadingInfo resolve_heading(std::vector<TeleFrame>& records, double offset_override_deg);
 
 // Per-frame telemetry lookup, read-only after construction (safe to share
 // across the inference and display threads without locking).
@@ -49,6 +94,11 @@ public:
     bool   has_any_attitude() const {
         for (const TeleFrame& f : recs_)
             if (f.has_attitude) return true;
+        return false;
+    }
+    bool   has_any_heading() const {
+        for (const TeleFrame& f : recs_)
+            if (f.has_heading) return true;
         return false;
     }
 

@@ -15,6 +15,12 @@ struct RangeEstimate {
     float       slant_m  = -1.0f;   // camera -> target along the ray [m]
     float       ground_m = -1.0f;   // horizontal distance [m]; <0 = unknown
     RangeMethod method   = RangeMethod::None;
+
+    // Rough target position (see TargetState): only when the frame's telemetry
+    // has GPS + a camera heading and ground_m is known.
+    bool        has_geo     = false;
+    double      lat = 0.0, lon = 0.0;
+    float       bearing_deg = 0.0f;   // camera -> target, [0,360) CW from north
 };
 
 // Estimates the distance to the locked target once per inference frame, from
@@ -37,6 +43,13 @@ struct RangeEstimate {
 // Output is a rolling median over smooth_window frames; the window resets on a
 // new lock or a method change (different methods disagree systematically).
 //
+// Position — when the telemetry also has GPS and a camera heading, the same
+// bottom-center ray is rotated with yaw = heading; its horizontal direction is
+// the compass bearing to the target, and the target sits ground_m along it from
+// the drone. Without a pitch the ray is rotated level, which reduces to
+// heading + the pixel's horizontal angle. This is a ROUGH fix: distance error
+// and heading error add up (10 deg of heading is ~17% of the range sideways).
+//
 // Single-threaded use (the inference-thread tail): pure CPU, no locking.
 class RangeEstimator {
 public:
@@ -58,6 +71,12 @@ private:
     RangeEstimate ground_plane(const TargetState& target, const TeleFrame* tele,
                                double f_px) const;
     double ground_from_slant(double slant_m, const TeleFrame* tele) const;
+    double focal_mm(const TeleFrame* tele) const;
+    bool   attitude(const TeleFrame* tele, double& pitch, double& roll) const;
+    void   world_ray(const TargetState& target, double f_px, double yaw_deg,
+                     double pitch_deg, double roll_deg, double dw[3]) const;
+    void   locate(RangeEstimate& est, const TargetState& target,
+                  const TeleFrame* tele) const;
 
     RangeCfg cfg_;
     int      width_, height_;

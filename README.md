@@ -38,7 +38,10 @@ also estimates the distance to the target. Real-time C++ on the GPU.
 - **Distance to the target** from drone telemetry ([details](#distance-to-the-target)).
 - **Swappable models.** RF-DETR, YOLO, WALDO or UniDrone, on ONNX Runtime or
   TensorRT, chosen in a YAML file.
-- **Per-frame record.** Optional JSON line per frame: box, velocity, state, distance.
+- **Map panel.** The drone on a street map and, once locked, the target's estimated
+  position and trail. Pan and zoom it with the mouse ([details](#target-on-the-map)).
+- **Per-frame record.** Optional JSON line per frame: box, velocity, state, distance,
+  estimated target position.
 
 ## Quick start
 
@@ -48,7 +51,8 @@ cuDNN 9, CMake ≥ 3.18 and a C++17 compiler.
 ```bash
 # 1. System packages (Ubuntu) + TensorRT
 sudo apt install build-essential cmake libopencv-dev libyaml-cpp-dev \
-                 libavformat-dev libavcodec-dev libavutil-dev libswscale-dev
+                 libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+                 libcurl4-openssl-dev
 pip install tensorrt
 
 # 2. Third-party code (not committed)
@@ -82,15 +86,20 @@ to the first `cmake`.
 **Mouse and keys:** click a target to lock · `r` reset · `space` pause ·
 `s` screenshot · `q` / `Esc` quit
 
+**On the map panel:** drag to pan · scroll or `+` / `-` to zoom · double-click or
+`f` to follow again
+
 | Option | What it does |
 |---|---|
 | `--zoom` | Magnified side panel of the locked target |
+| `--map` | Map side panel: the drone, plus the locked target's estimated position and trail |
 | `--record FILE` | Save the annotated video |
 | `--start N` | Start at frame N |
 | `--height N` | Working resolution (lower = faster, higher = more small-object detail) |
 | `--profile` | Print timing every 120 frames |
 | `--telemetry FILE` | Drone telemetry file (default: found automatically next to the video) |
 | `--gimbal-pitch DEG` | Fixed camera pitch for distance (0 = level, -90 = straight down) |
+| `--heading-offset DEG` | Correct the camera heading by hand (default: worked out from the clip) |
 
 Run with no arguments for the full list.
 
@@ -108,6 +117,7 @@ recommended one. Unknown or misspelled keys are rejected with an error.
 | `lock` | How strict the look-check is, how long to coast before `LOST`, the locked fast path |
 | `reid` | Appearance model: colour `histogram` or neural `onnx` (OSNet) |
 | `range` | Distance estimation: typical object sizes, smoothing, limits |
+| `map` | Map panel: tile source, attribution, cache folder, zoom limits, offline mode |
 | `input` / `output` | Working resolution; JSONL output path |
 
 ## How it works
@@ -148,6 +158,54 @@ and focal length, plus a distance to the locked target:
   if the target's ground is higher or lower than the take-off spot.
 - No telemetry at all? Set `range.equiv_focal_mm` to use the size method on any footage.
 - Check the maths without a GPU: `./build/test_range [telemetry_file]`.
+
+</details>
+
+## Target on the map
+
+Run with `--map` to add a north-up map next to the video.
+
+| What you see | When |
+|---|---|
+| Drone marker, its flown track, and a wedge for where the camera looks | Always (needs GPS in the telemetry) |
+| Target marker, a trail of where it has been, and a line from the drone | A target is locked and its position can be estimated |
+| A ring around the drone at the estimated distance | A target is locked but the camera's compass direction is unknown |
+
+The map follows the drone and target by itself and keeps its zoom when a lock
+ends. Take over with the mouse at any time, also while paused:
+
+| Action | Result |
+|---|---|
+| Drag | Pan. The view stays where you put it |
+| Scroll, or `+` / `-` | Zoom. The view keeps following the drone unless you have panned |
+| Double-click, or `f` | Follow the drone and target again |
+
+The target's position is the drone's GPS pushed out by the estimated distance along
+the direction the camera sees the target in. It is an estimate, not a survey:
+distance error and direction error add up, and 10° of direction error is about 17 %
+of the distance sideways. It is also written to the JSONL as `target_lat`, `target_lon`
+and `bearing_deg`.
+
+<details>
+<summary>Where the direction comes from, and limits</summary>
+
+- Many cameras store a per-frame metadata track inside the video file that carries
+  the airframe heading and the gimbal attitude, even when the telemetry file next
+  to the video does not. It is read automatically and merged with that file.
+- The gimbal's yaw is the stabilised direction the picture follows, but its zero
+  is not always north. The offset is worked out per clip by comparing it with the
+  airframe heading, assuming the camera faces forward on average. For a clip
+  where the camera is panned sideways throughout, set `--heading-offset DEG` (or
+  `range.heading_offset_deg`).
+- With the gimbal pitch available, distance uses the ground-plane method
+  automatically.
+- Map tiles are downloaded in the background the first time an area is shown, then
+  kept in `~/.cache/map_tiles`, so later runs work offline; missing tiles show as a
+  plain grid. The next zoom level out is loaded along with the visible one, so
+  zooming out does not blank the map. The default source is OpenStreetMap; `map.tile_url` changes it —
+  follow the provider's usage policy and keep its attribution.
+- `--record` saves the video frame only, not the side panels.
+- Check the maths without a GPU: `./build/test_geo_map [video_file]`.
 
 </details>
 

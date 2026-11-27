@@ -48,6 +48,11 @@ public:
             // "gp" = ground-plane (attitude); "est" = class-size prior
             j["range_method"] = s.range_method == RangeMethod::GroundPlane ? "gp" : "est";
         }
+        if (s.has_geo) {   // rough map position of the target (see TargetState)
+            j["target_lat"] = s.target_lat;
+            j["target_lon"] = s.target_lon;
+            j["bearing_deg"] = s.bearing_deg;
+        }
         out_ << j.dump() << '\n';
         out_.flush();
     }

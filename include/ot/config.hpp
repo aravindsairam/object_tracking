@@ -1,5 +1,6 @@
 #pragma once
 
+#include <limits>
 #include <map>
 #include <string>
 
@@ -207,6 +208,27 @@ struct RangeCfg {
     float ground_alt_offset_m = 0.0f;     // target-ground elevation vs takeoff point [m]
     float equiv_focal_mm      = 0.0f;     // 0 = per-frame from telemetry; set a 35mm-equiv
                                           // value for videos without telemetry
+    // Camera heading = gimbal yaw + this offset [deg]. NaN (key absent) = measure
+    // it from the clip (see ot::resolve_heading). Set it for a clip where the
+    // camera is panned away from the airframe's nose the whole time.
+    float heading_offset_deg  = std::numeric_limits<float>::quiet_NaN();
+};
+
+// Map side panel (--map): where the drone is and, once locked, a rough position
+// and trail for the target. Tiles follow the standard {z}/{x}/{y} "slippy map"
+// scheme; they are fetched in the background and cached on disk, so each area
+// is downloaded once and the panel keeps working offline (plain grid where a
+// tile is missing). Respect the tile provider's usage policy when changing
+// tile_url, and keep its attribution text.
+struct MapCfg {
+    std::string tile_url    = "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+    std::string attribution = "(c) OpenStreetMap contributors";
+    std::string user_agent  = "map-tile-viewer/1.0";   // sent with tile requests
+    std::string cache_dir;                // "" = $XDG_CACHE_HOME or ~/.cache, /map_tiles
+    bool offline       = false;           // true = never download, cached tiles only
+    int  default_zoom  = 17;              // zoom while only the drone is shown
+    int  max_zoom      = 19;              // closest zoom the provider serves
+    int  min_zoom      = 3;
 };
 
 // Top-level runtime configuration. Grows with later milestones.
@@ -218,6 +240,7 @@ struct Config {
     ReidCfg     reid;
     OutputCfg   output;
     RangeCfg    range;
+    MapCfg      map;
     int work_height = 640;              // working resolution (downscale target); 0 = native
     std::string decoder = "auto";       // video decode backend: auto | nvdec | software
 };

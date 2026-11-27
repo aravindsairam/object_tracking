@@ -3,6 +3,8 @@
 // budget (size prior ~10-15%, dominated by how typical the class prior is).
 #include "ot/range_estimator.hpp"
 
+#include "ot/geodesy.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -18,13 +20,13 @@ float median(const std::deque<float>& w) {
     return *mid;
 }
 
-constexpr double kDeg = M_PI / 180.0;
+constexpr double kDeg = kDegToRad;
 
 // R such that v_world = R * v_cam; camera frame +x right, +y down, +z forward;
 // world x East, y North, z Up. yaw = optical-axis heading CW from north, pitch
 // 0 = level / -90 = nadir, roll about the optical axis. Same verified form as
-// the feat/2d-geolocation reference; range only needs the vertical component,
-// so callers pass yaw = 0.
+// the feat/2d-geolocation reference. Range only needs the vertical component
+// (yaw = 0); the target position passes the camera heading.
 void rotation(double yaw_deg, double pitch_deg, double roll_deg, double R[3][3]) {
     const double psi = yaw_deg * kDeg, th = pitch_deg * kDeg, ph = roll_deg * kDeg;
     const double fwd[3]    = {std::sin(psi) * std::cos(th),
@@ -82,20 +84,69 @@ double RangeEstimator::ground_from_slant(double slant_m, const TeleFrame* tele) 
     return std::sqrt(std::max(0.0, slant_m * slant_m - h * h));
 }
 
+double RangeEstimator::focal_mm(const TeleFrame* tele) const {
+    return cfg_.equiv_focal_mm > 0.0f ? cfg_.equiv_focal_mm
+         : (tele && tele->has_focal) ? tele->focal_len : 0.0;
+}
+
+// Attitude precedence: static --gimbal-pitch > per-frame telemetry gb_*.
+// Leaves pitch/roll at 0 (level) and returns false when neither exists.
+bool RangeEstimator::attitude(const TeleFrame* tele, double& pitch, double& roll) const {
+    pitch = 0.0;
+    roll = 0.0;
+    if (have_static_pitch_) {
+        pitch = static_pitch_deg_;
+        return true;
+    }
+    if (tele && tele->has_attitude) {
+        pitch = tele->gb_pitch;
+        roll = tele->gb_roll;
+        return true;
+    }
+    return false;
+}
+
+// Unit ray through the box's ground-contact pixel (bottom-center), world frame.
+void RangeEstimator::world_ray(const TargetState& t, double f_px, double yaw_deg,
+                               double pitch_deg, double roll_deg, double dw[3]) const {
+    const double u = t.box.x + t.box.w * 0.5;
+    const double v = t.box.y + t.box.h;
+    double d[3] = {(u - width_ * 0.5) / f_px, (v - height_ * 0.5) / f_px, 1.0};
+    const double norm = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    for (double& x : d) x /= norm;
+    double R[3][3];
+    rotation(yaw_deg, pitch_deg, roll_deg, R);
+    for (int i = 0; i < 3; ++i)
+        dw[i] = R[i][0] * d[0] + R[i][1] * d[1] + R[i][2] * d[2];
+}
+
+void RangeEstimator::locate(RangeEstimate& est, const TargetState& t,
+                            const TeleFrame* tele) const {
+    if (!tele || !tele->has_gps || !tele->has_heading || est.ground_m < 0.0f) return;
+    const double focal = focal_mm(tele);
+    if (!(focal > 0.0)) return;
+
+    double pitch = 0.0, roll = 0.0;
+    attitude(tele, pitch, roll);   // level when unknown: bearing = heading + pixel angle
+    double dw[3];
+    world_ray(t, focal / 36.0 * width_, tele->heading, pitch, roll, dw);
+    // A ray pointing (almost) straight down has no horizontal direction; the
+    // target is then under the drone and the bearing does not matter.
+    const double bearing = std::hypot(dw[0], dw[1]) > 1e-6
+                               ? std::atan2(dw[0], dw[1]) * kRadToDeg
+                               : tele->heading;
+    destination(tele->lat, tele->lon, bearing, est.ground_m, est.lat, est.lon);
+    est.bearing_deg = static_cast<float>(wrap180(bearing) < 0.0 ? wrap180(bearing) + 360.0
+                                                                : wrap180(bearing));
+    est.has_geo = true;
+}
+
 RangeEstimate RangeEstimator::ground_plane(const TargetState& t, const TeleFrame* tele,
                                            double f_px) const {
     RangeEstimate est;
 
-    // Attitude precedence: static --gimbal-pitch > per-frame telemetry gb_*.
     double pitch = 0.0, roll = 0.0;
-    if (have_static_pitch_) {
-        pitch = static_pitch_deg_;
-    } else if (tele && tele->has_attitude) {
-        pitch = tele->gb_pitch;
-        roll = tele->gb_roll;
-    } else {
-        return est;
-    }
+    if (!attitude(tele, pitch, roll)) return est;
 
     // Camera height above the target's ground; barometric rel_alt is relative
     // to the takeoff point, ground_alt_offset_m corrects for different terrain.
@@ -103,17 +154,8 @@ RangeEstimate RangeEstimator::ground_plane(const TargetState& t, const TeleFrame
     const double h = tele->rel_alt - cfg_.ground_alt_offset_m;
     if (h <= 0.0) return est;
 
-    // Unit ray through the box's ground-contact pixel (bottom-center), world frame.
-    const double u = t.box.x + t.box.w * 0.5;
-    const double v = t.box.y + t.box.h;
-    double d[3] = {(u - width_ * 0.5) / f_px, (v - height_ * 0.5) / f_px, 1.0};
-    const double norm = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-    for (double& x : d) x /= norm;
-    double R[3][3];
-    rotation(0.0, pitch, roll, R);
     double dw[3];
-    for (int i = 0; i < 3; ++i)
-        dw[i] = R[i][0] * d[0] + R[i][1] * d[1] + R[i][2] * d[2];
+    world_ray(t, f_px, 0.0, pitch, roll, dw);
 
     // The ray must descend meaningfully: near-horizon rays blow the range up
     // (range ~ h/tan(depression)), so treat them as no-fix rather than emit
@@ -132,8 +174,7 @@ RangeEstimate RangeEstimator::raw_estimate(const TargetState& t,
                                            const TeleFrame* tele) const {
     RangeEstimate est;
 
-    const double focal = cfg_.equiv_focal_mm > 0.0f ? cfg_.equiv_focal_mm
-                       : (tele && tele->has_focal) ? tele->focal_len : 0.0;
+    const double focal = focal_mm(tele);
     if (!(focal > 0.0)) return est;
     const double f_px = focal / 36.0 * width_;
 
@@ -183,6 +224,7 @@ RangeEstimate RangeEstimator::update(const TargetState& target, const TeleFrame*
     est.method = raw.method;
     est.slant_m = median(slant_win_);
     est.ground_m = static_cast<float>(ground_from_slant(est.slant_m, tele));
+    locate(est, target, tele);
     return est;
 }
 

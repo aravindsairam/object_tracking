@@ -34,6 +34,14 @@ struct TargetState {
     float       range_ground_m = -1.0f;   // horizontal distance [m]; <0 = unknown
     RangeMethod range_method   = RangeMethod::None;
 
+    // Rough map position of the target: the drone's GPS pushed out by the ground
+    // distance along the camera->target compass bearing. Needs GPS, a camera
+    // heading and a ground distance; has_geo is false whenever one is missing.
+    bool        has_geo     = false;
+    double      target_lat  = 0.0;        // [deg]
+    double      target_lon  = 0.0;        // [deg]
+    float       bearing_deg = 0.0f;       // camera -> target, [0,360) CW from north
+
     bool valid() const { return state == LockState::Locked || state == LockState::Coasting; }
 };
 

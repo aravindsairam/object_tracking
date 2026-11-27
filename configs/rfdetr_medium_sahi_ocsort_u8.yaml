@@ -107,3 +107,16 @@ range:
   # min_depression_deg: 1.0  # gp: reject rays this close to the horizon
   # ground_alt_offset_m: 0   # gp/est: target-ground elevation vs takeoff [m]
   # equiv_focal_mm: 0        # set (35mm equiv) to enable est without telemetry
+  # heading_offset_deg: 52   # camera heading = gimbal yaw + this; default: measured
+                             # from the clip (set it if the camera is panned sideways
+                             # for the whole clip)
+
+# Map side panel (--map): the drone and, once locked, the target's estimated
+# position + trail. Tiles are downloaded once and cached on disk.
+# map:
+#   tile_url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+#   attribution: "(c) OpenStreetMap contributors"
+#   cache_dir: ""            # "" = ~/.cache/map_tiles
+#   offline: false           # true = never download, cached tiles only
+#   default_zoom: 17         # zoom while only the drone is shown
+#   max_zoom: 19

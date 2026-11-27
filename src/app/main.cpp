@@ -3,6 +3,7 @@
 #include "ot/config.hpp"
 #include "ot/detector_factory.hpp"
 #include "ot/lock_manager.hpp"
+#include "ot/map_panel.hpp"
 #include "ot/mot_tracker.hpp"
 #include "ot/one_euro.hpp"
 #include "ot/overlay.hpp"
@@ -26,6 +27,7 @@
 #include <cstdlib>
 #include <exception>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -169,7 +171,14 @@ int main(int argc, char** argv) {
             "  --telemetry FILE  drone telemetry file (default: auto-detect next to the video)\n"
             "  --gimbal-pitch DEG  fixed gimbal pitch for ground-plane ranging (0=level, -90=nadir;\n"
             "                 overrides telemetry attitude; for clips with a known, held pitch)\n"
-            "  keys:  click=lock  r=reset  space=pause  s=screenshot  q/ESC=quit\n",
+            "  --map          show a map side panel: the drone, and the locked target's\n"
+            "                 estimated position + trail (needs GPS in the telemetry; tiles are downloaded\n"
+            "                 once and cached, see the map: config section)\n"
+            "  --map-width N  width of the map side panel in px (default: 480)\n"
+            "  --heading-offset DEG  camera heading = gimbal yaw + DEG (default: measured from\n"
+            "                 the clip; set it when the camera is panned off the nose throughout)\n"
+            "  keys:  click=lock  r=reset  space=pause  s=screenshot  q/ESC=quit\n"
+            "  map:   drag=pan  wheel or +/- = zoom  double-click or f = follow again\n",
             argv[0]);
         return 2;
     }
@@ -188,6 +197,9 @@ int main(int argc, char** argv) {
     std::string tele_override;      // --telemetry FILE (else auto-detect)
     bool   have_gimbal_pitch = false;
     double gimbal_pitch = 0.0;     // --gimbal-pitch DEG: fixed attitude for ranging
+    bool map = false;              // show the map side panel
+    int  map_w = 480;              // map side-panel width in px
+    double heading_offset = std::numeric_limits<double>::quiet_NaN();   // --heading-offset DEG
     for (int i = 2; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--height" && i + 1 < argc)      target_height = std::stoi(argv[++i]);
@@ -201,6 +213,9 @@ int main(int argc, char** argv) {
         else if (a == "--zoom")                   zoom = true;
         else if (a == "--zoom-width" && i + 1 < argc) zoom_w = std::max(120, std::stoi(argv[++i]));
         else if (a == "--telemetry" && i + 1 < argc) tele_override = argv[++i];
+        else if (a == "--map")                    map = true;
+        else if (a == "--map-width" && i + 1 < argc) map_w = std::max(200, std::stoi(argv[++i]));
+        else if (a == "--heading-offset" && i + 1 < argc) heading_offset = std::stod(argv[++i]);
         else if (a == "--gimbal-pitch" && i + 1 < argc) {
             gimbal_pitch = std::stod(argv[++i]);
             have_gimbal_pitch = true;
@@ -225,20 +240,50 @@ int main(int argc, char** argv) {
                     cfg.detector.class_map.c_str(), cfg.tiling.enabled ? "on" : "off");
         if (start_frame > 0) source.seek(start_frame);
 
-        // Drone telemetry file (GPS / altitude / per-frame focal; gimbal attitude
-        // when the drone records it). Auto-detected next to a file
-        // source, --telemetry overrides. Absence just leaves telemetry features off.
+        // Drone telemetry, from two places that are merged per frame:
+        //  - the telemetry file next to the video (GPS / altitude / per-frame
+        //    focal; gimbal attitude when the drone writes it there). Auto-detected
+        //    for a file source, --telemetry overrides;
+        //  - the metadata track embedded in the video file itself, which adds
+        //    what that file usually lacks: airframe heading and gimbal attitude.
+        // The file wins where both have a value. Absence of both just leaves the
+        // telemetry features off.
         std::unique_ptr<ot::Telemetry> telemetry;
-        const std::string tele_path = !tele_override.empty() ? tele_override
-                                                             : ot::find_telemetry_sidecar(argv[1]);
-        if (!tele_path.empty()) {
-            try {
-                telemetry = std::make_unique<ot::Telemetry>(ot::parse_telemetry(tele_path));
-                std::printf("[run] telemetry: %s (%zu records%s)\n", tele_path.c_str(),
-                            telemetry->size(),
-                            telemetry->has_any_attitude() ? ", gimbal attitude" : "");
-            } catch (const std::exception& e) {
-                std::fprintf(stderr, "[run] telemetry unavailable: %s\n", e.what());
+        {
+            std::vector<ot::TeleFrame> recs;
+            const std::string tele_path = !tele_override.empty() ? tele_override
+                                                                 : ot::find_telemetry_sidecar(argv[1]);
+            if (!tele_path.empty()) {
+                try {
+                    recs = ot::parse_telemetry(tele_path);
+                    std::printf("[run] telemetry: %s (%zu records)\n", tele_path.c_str(), recs.size());
+                } catch (const std::exception& e) {
+                    std::fprintf(stderr, "[run] telemetry unavailable: %s\n", e.what());
+                }
+            }
+            const std::vector<ot::TeleFrame> embedded = ot::parse_embedded_telemetry(argv[1]);
+            if (!embedded.empty()) {
+                std::printf("[run] telemetry: embedded metadata track (%zu records)\n", embedded.size());
+                ot::merge_telemetry(recs, embedded);
+            }
+            if (!recs.empty()) {
+                // Camera heading: CLI > config > measured from the clip.
+                const double off = std::isfinite(heading_offset) ? heading_offset
+                                                                 : static_cast<double>(cfg.range.heading_offset_deg);
+                const ot::HeadingInfo hi = ot::resolve_heading(recs, off);
+                telemetry = std::make_unique<ot::Telemetry>(std::move(recs));
+                using Src = ot::HeadingInfo::Source;
+                if (hi.source == Src::GimbalPlusOffset)
+                    std::printf("[run] camera heading: gimbal yaw %+.1f deg (%s)\n", hi.offset_deg,
+                                hi.offset_auto ? "offset measured from the clip" : "offset given");
+                else if (hi.source == Src::GimbalYaw)
+                    std::printf("[run] camera heading: gimbal yaw as recorded\n");
+                else if (hi.source == Src::BodyYaw)
+                    std::printf("[run] camera heading: airframe yaw\n");
+                else
+                    std::printf("[run] camera heading: none in telemetry (no target position)\n");
+                if (telemetry->has_any_attitude())
+                    std::printf("[run] telemetry has gimbal attitude (ground-plane ranging)\n");
             }
         }
 
@@ -320,14 +365,31 @@ int main(int argc, char** argv) {
             std::printf("[run] recording annotated video to %s\n", record_path.c_str());
         }
 
-        // When the zoom panel is on, the window widens by zoom_w. The displayed
-        // image (and thus the selector's click space) is the full composite size.
-        const int disp_w = W + (zoom ? zoom_w : 0);
+        // Side panels sit to the right of the video: [video | zoom | map]. The
+        // displayed image (and thus the selector's click space) is the full
+        // composite size.
+        const int disp_w = W + (zoom ? zoom_w : 0) + (map ? map_w : 0);
         cv::namedWindow(kWindow, cv::WINDOW_NORMAL);
         cv::resizeWindow(kWindow, disp_w, H);
         ot::Selector selector(kWindow, cv::Size(disp_w, H));
         if (zoom) std::printf("[run] zoom side-panel enabled (%dpx wide)\n", zoom_w);
+        // Display-thread only. Its tile loader runs on its own background thread.
+        std::unique_ptr<ot::MapPanel> map_panel;
+        if (map) {
+            map_panel = std::make_unique<ot::MapPanel>(cfg.map, map_w, H);
+            std::printf("[run] map side-panel enabled (%dpx wide, tiles %s)\n", map_w,
+                        cfg.map.offline ? "from cache only" : "downloaded once, then cached");
+            if (!telemetry)
+                std::fprintf(stderr, "[run] map: no telemetry for this source, the panel will stay empty\n");
+            // Mouse events over the window reach the panel in its own pixel space.
+            const int map_x = W + (zoom ? zoom_w : 0);
+            selector.set_handler([mp = map_panel.get(), map_x](int event, int x, int y, int flags) {
+                mp->on_mouse(event, x - map_x, y, flags);
+            });
+        }
         std::printf("[run] click a target to lock.  keys: r=reset space=pause s=shot q=quit\n");
+        if (map)
+            std::printf("[run] map: drag=pan  wheel or +/- = zoom  double-click or f = follow again\n");
 
         // ---- pipeline state -------------------------------------------------
         // The capture thread feeds TWO consumers: the display gets EVERY decoded
@@ -512,6 +574,10 @@ int main(int argc, char** argv) {
                     target.range_slant_m  = est.slant_m;
                     target.range_ground_m = est.ground_m;
                     target.range_method   = est.method;
+                    target.has_geo        = est.has_geo;
+                    target.target_lat     = est.lat;
+                    target.target_lon     = est.lon;
+                    target.bearing_deg    = est.bearing_deg;
                 }
 
                 const bool locked = lock.has_target() || lock.state() == ot::LockState::Lost;
@@ -616,9 +682,10 @@ int main(int argc, char** argv) {
                 // frame): GPS, altitude, per-frame focal, attitude if the telemetry
                 // carries it. Telemetry is read-only after load, so reading it
                 // here off the inference thread is safe.
+                const ot::TeleFrame* tf_disp = telemetry ? telemetry->at(df.index) : nullptr;
                 if (telemetry) {
-                    if (const ot::TeleFrame* tf = telemetry->at(df.index)) {
-                        char tl[192];
+                    if (const ot::TeleFrame* tf = tf_disp) {
+                        char tl[224];
                         int n = 0;
                         if (tf->has_gps)
                             n = std::snprintf(tl, sizeof(tl), "GPS %.6f, %.6f  ",
@@ -629,31 +696,62 @@ int main(int argc, char** argv) {
                             n += std::snprintf(tl + n, sizeof(tl) - n, "  f %.0fmm",
                                                tf->focal_len);
                         if (tf->has_attitude)
-                            std::snprintf(tl + n, sizeof(tl) - n, "  gimbal %.1f/%.1f/%.1f",
-                                          tf->gb_yaw, tf->gb_pitch, tf->gb_roll);
+                            n += std::snprintf(tl + n, sizeof(tl) - n, "  gimbal %.1f/%.1f/%.1f",
+                                               tf->gb_yaw, tf->gb_pitch, tf->gb_roll);
+                        if (tf->has_heading)
+                            std::snprintf(tl + n, sizeof(tl) - n, "  hdg %.0f",
+                                          tf->heading < 0.0 ? tf->heading + 360.0 : tf->heading);
                         cv::putText(df.img, tl, {12, 54}, cv::FONT_HERSHEY_SIMPLEX,
                                     0.55, {0, 255, 0}, 1, cv::LINE_AA);
                     }
+                }
+                // Rough map position of the locked target (drone GPS + distance
+                // along the camera->target bearing).
+                if (have_res && r_locked && target.valid() && target.has_geo) {
+                    char gl[128];
+                    std::snprintf(gl, sizeof(gl), "TGT ~%.6f, %.6f  brg %.0f", target.target_lat,
+                                  target.target_lon, target.bearing_deg);
+                    cv::putText(df.img, gl, {12, 78}, cv::FONT_HERSHEY_SIMPLEX, 0.55,
+                                {0, 255, 0}, 1, cv::LINE_AA);
                 }
                 const double draw_ms = dur_ms(td0, std::chrono::steady_clock::now());
                 ema_draw = ema_draw == 0.0 ? draw_ms : 0.9 * ema_draw + 0.1 * draw_ms;
 
                 if (recorder) recorder->write(df.img);   // record the W x H main frame only
 
-                // Compose main frame + zoom panel side by side for display. The
-                // panel shows a placeholder when nothing is locked, so the output
-                // size stays constant (no window flicker) and screenshots ('s')
-                // capture the full view.
-                if (zoom) {
-                    cv::Mat panel = ot::render_zoom_panel(zoom_crop, zoom_src, target,
-                                                          have_res && r_locked, class_map, zoom_w, H);
+                // Compose main frame + side panels for display. The panels show
+                // a placeholder when nothing is locked, so the output size stays
+                // constant (no window flicker) and screenshots ('s') capture the
+                // full view.
+                if (zoom || map_panel) {
                     cv::Mat canvas(H, disp_w, df.img.type());
                     df.img.copyTo(canvas(cv::Rect(0, 0, W, H)));
-                    panel.copyTo(canvas(cv::Rect(W, 0, zoom_w, H)));
+                    int x = W;
+                    if (zoom) {
+                        cv::Mat panel = ot::render_zoom_panel(zoom_crop, zoom_src, target,
+                                                              have_res && r_locked, class_map, zoom_w, H);
+                        panel.copyTo(canvas(cv::Rect(x, 0, zoom_w, H)));
+                        x += zoom_w;
+                    }
+                    if (map_panel) {
+                        const bool lk = have_res && r_locked;
+                        cv::Mat panel = map_panel->render(
+                            tf_disp, target, lk, df.index,
+                            lk ? class_map.label(target.class_id) : std::string());
+                        panel.copyTo(canvas(cv::Rect(x, 0, map_w, H)));
+                    }
                     df.img = std::move(canvas);
                 }
                 shown = std::move(df);
                 have_shown = true;
+            }
+
+            // No new video frame (paused / stalled): the map still has to answer
+            // the mouse and show tiles as they arrive, so repaint just its panel.
+            if (!fresh && have_shown && map_panel && map_panel->needs_redraw()) {
+                const cv::Mat panel = map_panel->redraw();
+                if (!panel.empty())
+                    panel.copyTo(shown.img(cv::Rect(W + (zoom ? zoom_w : 0), 0, map_w, H)));
             }
 
             // Re-show the last frame on timeout so the window stays live (e.g.
@@ -661,7 +759,7 @@ int main(int argc, char** argv) {
             const auto ts0 = std::chrono::steady_clock::now();
             if (have_shown) cv::imshow(kWindow, shown.img);
             cv::Point2f click;
-            // Ignore clicks that land in the zoom side panel (x >= W).
+            // Ignore clicks that land in a side panel (x >= W).
             if (selector.poll(click) && click.x < static_cast<float>(W)) cmds.post_click(click);
             const double show_ms = dur_ms(ts0, std::chrono::steady_clock::now());
             ema_show = ema_show == 0.0 ? show_ms : 0.9 * ema_show + 0.1 * show_ms;
@@ -687,6 +785,11 @@ int main(int argc, char** argv) {
             if (key == 'q' || key == 27) { running.store(false); break; }
             if (key == ' ') paused.store(!paused.load());
             if (key == 'r') cmds.post_reset();
+            if (map_panel) {
+                if (key == '+' || key == '=') map_panel->zoom_by(+1);
+                if (key == '-' || key == '_') map_panel->zoom_by(-1);
+                if (key == 'f') map_panel->follow();
+            }
             if (key == 's' && have_shown) {
                 const std::string file = "shot_" + std::to_string(shown.index) + ".png";
                 cv::imwrite(file, shown.img);
