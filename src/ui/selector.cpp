@@ -14,9 +14,10 @@ Selector::Selector(const std::string& window, cv::Size image_size)
     cv::setMouseCallback(window, &Selector::on_mouse, this);
 }
 
-void Selector::on_mouse(int event, int x, int y, int /*flags*/, void* userdata) {
-    if (event != cv::EVENT_LBUTTONDOWN) return;
+void Selector::on_mouse(int event, int x, int y, int flags, void* userdata) {
     auto* self = static_cast<Selector*>(userdata);
+    if (self->handler_) self->handler_(event, x, y, flags);
+    if (event != cv::EVENT_LBUTTONDOWN) return;
     // highgui reports coordinates in the displayed image's pixel space (it
     // accounts for window resizing), so they map directly to the working frame.
     self->click_.x = std::clamp(static_cast<float>(x), 0.0f,

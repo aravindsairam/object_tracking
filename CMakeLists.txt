@@ -18,6 +18,8 @@ add_compile_definitions(EIGEN_MAX_ALIGN_BYTES=32 EIGEN_MAX_STATIC_ALIGN_BYTES=32
 
 find_package(OpenCV REQUIRED)
 find_package(yaml-cpp REQUIRED)
+# libcurl: downloads map tiles for the --map side panel (src/ui/tile_cache.cpp).
+find_package(CURL REQUIRED)
 
 # FFmpeg libraries for the NVDEC (NvdecDecoder) hardware-decode path. The system
 # libavcodec is built with cuvid (it links libnvcuvid at runtime), so no
@@ -91,8 +93,11 @@ add_library(ot_core
   src/reid/onnx_reid_embedder.cpp
   src/output/jsonl_sink.cpp
   src/geo/telemetry.cpp
+  src/geo/embedded_telemetry.cpp
   src/geo/range_estimator.cpp
   src/ui/overlay.cpp
+  src/ui/tile_cache.cpp
+  src/ui/map_panel.cpp
   src/ui/selector.cpp
 )
 target_include_directories(ot_core PUBLIC
@@ -112,7 +117,7 @@ if(OT_NATIVE_ARCH AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 # motcpp is a private impl detail (used only inside src/track/mot_tracker.cpp).
 target_link_libraries(ot_core PUBLIC ${OpenCV_LIBS} yaml-cpp onnxruntime PkgConfig::FFMPEG)
-target_link_libraries(ot_core PRIVATE motcpp)
+target_link_libraries(ot_core PRIVATE motcpp CURL::libcurl)
 
 # Embed an rpath so the binary finds libonnxruntime.so without LD_LIBRARY_PATH.
 set_target_properties(ot_core PROPERTIES INSTALL_RPATH ${ORT_ROOT}/lib)
@@ -164,6 +169,15 @@ add_executable(test_range tools/test_range.cpp)
 target_link_libraries(test_range PRIVATE ot_core)
 target_link_options(test_range PRIVATE -Wl,--disable-new-dtags)
 set_target_properties(test_range PROPERTIES
+  BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
+  INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
+
+# Logic-only unit test for the map feature: embedded telemetry decoding, camera
+# heading, target position, map/tile math, and an offline map-panel render.
+add_executable(test_geo_map tools/test_geo_map.cpp)
+target_link_libraries(test_geo_map PRIVATE ot_core)
+target_link_options(test_geo_map PRIVATE -Wl,--disable-new-dtags)
+set_target_properties(test_geo_map PROPERTIES
   BUILD_RPATH   "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}"
   INSTALL_RPATH "${ORT_ROOT}/lib;${CUDA_LIB_DIR};${TENSORRT_LIB_DIR}")
 
@@ -221,7 +235,7 @@ set_target_properties(bench_pipeline PROPERTIES
 # ---- warnings on our own targets (vendored motcpp left untouched) ----------
 # -Wall -Wextra catches dead functions, unused vars/params, sign-compare slips.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_config test_lock_appearance test_lock_reticle test_range test_roi parity_dump test_batch_switch bench_batch_flip bench_pipeline)
+  foreach(tgt ot_core object_tracking rfdetr_smoke reid_smoke test_config test_lock_appearance test_lock_reticle test_range test_geo_map test_roi parity_dump test_batch_switch bench_batch_flip bench_pipeline)
     target_compile_options(${tgt} PRIVATE -Wall -Wextra)
   endforeach()
 endif()

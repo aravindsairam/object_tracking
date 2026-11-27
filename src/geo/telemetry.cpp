@@ -62,7 +62,7 @@ bool parse_block(const std::string& text, TeleFrame& out) {
     find_num(text, "abs_alt", out.abs_alt);
     out.has_focal = find_num(text, "focal_len", out.focal_len);
     out.has_attitude = find_num(text, "gb_pitch", out.gb_pitch);
-    find_num(text, "gb_yaw", out.gb_yaw);
+    out.has_gb_yaw = find_num(text, "gb_yaw", out.gb_yaw);
     find_num(text, "gb_roll", out.gb_roll);
     return true;
 }
