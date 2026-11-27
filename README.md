@@ -2,10 +2,9 @@
 
 <p align="center"><b>Click-to-lock target tracking and ranging for drone video</b></p>
 
-Click a person or vehicle in a drone video and SkyLock stays locked on it through
-camera motion, short occlusions and look-alikes nearby. If it truly loses the
-target it says so, instead of drifting onto something else. With drone telemetry it
-also estimates the distance to the target. Real-time C++ on the GPU.
+Click a person or vehicle in a drone video and SkyLock stays locked on it. If it
+loses the target it says so, instead of drifting onto something else. Real-time
+C++ on the GPU.
 
 ## Demo
 
@@ -25,23 +24,12 @@ also estimates the distance to the target. Real-time C++ on the GPU.
 
 ## Features
 
-- **Click to lock.** One target, followed until you reset.
-- **Stays on the right object.** Every frame the lock checks that the target still
-  *looks* like what you clicked, so a tracker ID swap can't quietly move it to a
-  neighbour.
-- **Honest status.** `LOCKED`, `COASTING` (briefly unseen, position predicted) or
-  `LOST` (waits for you).
-- **Small, distant targets.** The frame is split into tiles so the detector sees
-  tiny objects at full resolution.
-- **Fast once locked.** Only a small crop around the target is searched; the full
-  frame is re-checked every 20 frames.
-- **Distance to the target** from drone telemetry ([details](#distance-to-the-target)).
-- **Swappable models.** RF-DETR, YOLO, WALDO or UniDrone, on ONNX Runtime or
-  TensorRT, chosen in a YAML file.
-- **Map panel.** The drone on a street map and, once locked, the target's estimated
-  position and trail. Pan and zoom it with the mouse ([details](#target-on-the-map)).
-- **Per-frame record.** Optional JSON line per frame: box, velocity, state, distance,
-  estimated target position.
+- **Click to lock** one target and follow it until you reset.
+- **Stays on the right object** by checking every frame that it still looks like what you clicked.
+- **Honest status:** `LOCKED`, `COASTING` or `LOST`.
+- **Small, distant targets** are found by scanning the frame in tiles.
+- **Distance and map position** of the target, from drone telemetry.
+- **Swappable models:** RF-DETR, YOLO, WALDO or UniDrone, picked in a YAML file.
 
 ## Quick start
 
@@ -73,9 +61,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/object_tracking clip.mp4 configs/rfdetr_medium_sahi_ocsort_u8.yaml
 ```
 
-The first TensorRT run takes a few minutes to build and cache the engine; later
-runs start fast. If TensorRT isn't found, add `-DTENSORRT_LIB_DIR=/path/to/tensorrt_libs`
-to the first `cmake`.
+The first run takes a few minutes to build the TensorRT engine. If TensorRT isn't
+found, add `-DTENSORRT_LIB_DIR=/path/to/tensorrt_libs` to `cmake`.
 
 ## Usage
 
@@ -83,153 +70,89 @@ to the first `cmake`.
 ./build/object_tracking <video | rtsp-url | camera-index> [config.yaml] [options]
 ```
 
-**Mouse and keys:** click a target to lock · `r` reset · `space` pause ·
-`s` screenshot · `q` / `Esc` quit
-
-**On the map panel:** drag to pan · scroll or `+` / `-` to zoom · double-click or
-`f` to follow again
+| Keys and mouse | |
+|---|---|
+| Click | Lock a target |
+| `r` · `space` · `s` · `q` | Reset · pause · screenshot · quit |
+| On the map: drag · scroll or `+` `-` · double-click or `f` | Pan · zoom · follow again |
 
 | Option | What it does |
 |---|---|
-| `--zoom` | Magnified side panel of the locked target |
-| `--map` | Map side panel: the drone, plus the locked target's estimated position and trail |
+| `--zoom` | Magnified side panel of the target |
+| `--map` | Map side panel with the drone and the target |
 | `--record FILE` | Save the annotated video |
-| `--start N` | Start at frame N |
-| `--height N` | Working resolution (lower = faster, higher = more small-object detail) |
-| `--profile` | Print timing every 120 frames |
-| `--telemetry FILE` | Drone telemetry file (default: found automatically next to the video) |
-| `--gimbal-pitch DEG` | Fixed camera pitch for distance (0 = level, -90 = straight down) |
-| `--heading-offset DEG` | Correct the camera heading by hand (default: worked out from the clip) |
+| `--height N` | Working resolution (lower = faster) |
+| `--telemetry FILE` | Drone telemetry file (default: found next to the video) |
+| `--gimbal-pitch DEG` | Fixed camera pitch (0 = level, -90 = straight down) |
+| `--heading-offset DEG` | Correct the camera heading by hand |
 
 Run with no arguments for the full list.
 
 ## Configuration
 
-Everything is set in YAML, so models and behaviour change without recompiling.
-Start from a preset in `configs/`; `rfdetr_medium_sahi_ocsort_u8.yaml` is the
-recommended one. Unknown or misspelled keys are rejected with an error.
+Settings live in YAML presets in `configs/`. Start from
+`rfdetr_medium_sahi_ocsort_u8.yaml`. Misspelled keys are rejected.
 
 | Section | Controls |
 |---|---|
-| `detector` | Model family, model file, backend (`onnxruntime` / `tensorrt`), confidence threshold |
-| `tiling` | Tile size and overlap (fewer tiles = faster) |
-| `tracker` | `bytetrack` (fastest), `botsort` (steadiest with camera motion), `ocsort` (best for erratic aerial targets) |
-| `lock` | How strict the look-check is, how long to coast before `LOST`, the locked fast path |
-| `reid` | Appearance model: colour `histogram` or neural `onnx` (OSNet) |
-| `range` | Distance estimation: typical object sizes, smoothing, limits |
-| `map` | Map panel: tile source, attribution, cache folder, zoom limits, offline mode |
-| `input` / `output` | Working resolution; JSONL output path |
+| `detector` | Model, backend (`onnxruntime` / `tensorrt`), confidence |
+| `tiling` | Tile size and overlap |
+| `tracker` | `bytetrack`, `botsort` or `ocsort` |
+| `lock` | Look-check strictness, time before `LOST` |
+| `reid` | Appearance model: `histogram` or `onnx` |
+| `range` | Distance estimation |
+| `map` | Map tiles, cache folder, offline mode |
 
 ## How it works
 
 ```
-video ─▶ decode ─▶ detect objects ─▶ track IDs ─▶ lock + appearance check ─▶ overlay + JSONL
-         (NVDEC)   (tiled, TensorRT)  (OC-SORT)    (LOCKED / COASTING / LOST)
-                                                              │
-drone telemetry ──────────────────────────────────────────────┴─▶ distance ─▶ position ─▶ map
-(file next to the video + the video's own metadata track)
+video ─▶ detect ─▶ track ─▶ lock ─▶ overlay
+                              │
+telemetry ────────────────────┴─▶ distance ─▶ map
 ```
 
-Capture, inference and display run on separate threads, so playback stays smooth
-even when a frame takes longer to process.
-
-When the video comes with drone telemetry, the locked box is also turned into a
-[distance](#distance-to-the-target) and a [position on the map](#target-on-the-map).
-Map tiles load on their own background thread, so the display never waits for them.
-
-The hard part is staying on the *right* object. Trackers sometimes hand an ID to
-a different object, so a matching ID is never trusted on its own: the target must
-keep resembling the appearance template stored when you clicked. After a loss,
-the lock only re-attaches to a candidate that is near the last known position and
-clearly the best match.
+A matching tracker ID is never trusted alone: the target must keep looking like
+what you clicked. After a loss, the lock only returns to a clear best match near
+the last position.
 
 ## Distance to the target
 
-Keep the telemetry file your drone saves with each video next to it, with the same
-name (or pass `--telemetry FILE`). The overlay then shows the drone's GPS, altitude
-and focal length, plus a distance to the locked target:
+Keep the drone's telemetry file next to the video with the same name.
 
 | Shown as | Method | Needs |
 |---|---|---|
-| `~143m` | Ray from the camera to the target's ground contact point, intersected with flat ground | Camera pitch: from telemetry that records the gimbal, or `--gimbal-pitch` |
-| `~143m(est)` | Known typical size of the class (car ≈ 4.6 m, person ≈ 1.7 m) vs its size on screen | Only basic telemetry (GPS, altitude, focal length) |
+| `~143m` | Camera ray meets flat ground | Camera pitch |
+| `~143m(est)` | Typical object size vs size on screen | GPS, altitude, focal length |
 
-<details>
-<summary>Accuracy and limits</summary>
-
-- Zoom changes mid-clip are handled: the focal length is read per frame from the telemetry.
-- Values are median-smoothed; implausible results (near the horizon, beyond
-  `range.max_range_m`) are hidden rather than shown wrong. `LOST` targets get none.
-- `(est)` is roughly ±10–15 %. Ground-plane accuracy depends on the pitch value and
-  on altitude being relative to the take-off point; set `range.ground_alt_offset_m`
-  if the target's ground is higher or lower than the take-off spot.
-- No telemetry at all? Set `range.equiv_focal_mm` to use the size method on any footage.
-- Check the maths without a GPU: `./build/test_range [telemetry_file]`.
-
-</details>
+`(est)` is about ±10–15 %. Implausible values are hidden. No telemetry? Set
+`range.equiv_focal_mm` to use the size method.
 
 ## Target on the map
 
-Run with `--map` to add a north-up map next to the video.
+Run with `--map`.
 
-| What you see | When |
+| You see | When |
 |---|---|
-| Drone marker, its flown track, and a wedge for where the camera looks | Always (needs GPS in the telemetry) |
-| Target marker, a trail of where it has been, and a line from the drone | A target is locked and its position can be estimated |
-| A ring around the drone at the estimated distance | A target is locked but the camera's compass direction is unknown |
+| Drone, its track, camera view wedge | Always (needs GPS) |
+| Target marker and trail | A target is locked |
+| Ring around the drone | Locked, but camera direction unknown |
 
-The map follows the drone and target by itself and keeps its zoom when a lock
-ends. Take over with the mouse at any time, also while paused:
-
-| Action | Result |
-|---|---|
-| Drag | Pan. The view stays where you put it |
-| Scroll, or `+` / `-` | Zoom. The view keeps following the drone unless you have panned |
-| Double-click, or `f` | Follow the drone and target again |
-
-The target's position is the drone's GPS pushed out by the estimated distance along
-the direction the camera sees the target in. It is an estimate, not a survey:
-distance error and direction error add up, and 10° of direction error is about 17 %
-of the distance sideways. It is also written to the JSONL as `target_lat`, `target_lon`
-and `bearing_deg`.
-
-<details>
-<summary>Where the direction comes from, and limits</summary>
-
-- Many cameras store a per-frame metadata track inside the video file that carries
-  the airframe heading and the gimbal attitude, even when the telemetry file next
-  to the video does not. It is read automatically and merged with that file.
-- The gimbal's yaw is the stabilised direction the picture follows, but its zero
-  is not always north. The offset is worked out per clip by comparing it with the
-  airframe heading, assuming the camera faces forward on average. For a clip
-  where the camera is panned sideways throughout, set `--heading-offset DEG` (or
-  `range.heading_offset_deg`).
-- With the gimbal pitch available, distance uses the ground-plane method
-  automatically.
-- Map tiles are downloaded in the background the first time an area is shown, then
-  kept in `~/.cache/map_tiles`, so later runs work offline; missing tiles show as a
-  plain grid. The next zoom level out is loaded along with the visible one, so
-  zooming out does not blank the map. The default source is OpenStreetMap; `map.tile_url` changes it —
-  follow the provider's usage policy and keep its attribution.
-- `--record` saves the video frame only, not the side panels.
-- Check the maths without a GPU: `./build/test_geo_map [video_file]`.
-
-</details>
+- The position is an estimate: drone GPS + distance + camera direction.
+- Camera direction is read from the video file's own metadata. If the camera is
+  panned sideways for the whole clip, set `--heading-offset DEG`.
+- Map tiles come from OpenStreetMap the first time an area is shown, then from
+  `~/.cache/map_tiles`. Set `map.offline: true` to never download.
+- Also written to the JSONL: `target_lat`, `target_lon`, `bearing_deg`.
 
 ## Accuracy check: TensorRT FP16
 
-TensorRT FP16 engines can lose detections silently, so the production engine was
-checked against the reference backend on drone footage and on all 5,000 COCO
-val2017 images. It loses nothing measurable:
+The FP16 engine was checked on all 5,000 COCO val2017 images and loses nothing:
 
 | Backend | COCO AP | AP50 |
 |---|---|---|
 | ONNX Runtime CUDA (reference) | 54.68 | 73.45 |
 | TensorRT FP32 | 54.73 | 73.50 |
 | **TensorRT FP16 (production)** | **54.74** | **73.57** |
-
-All three match the published RF-DETR Medium result (54.7 / 73.6). On drone
-footage, FP16 boxes match the reference to within 0.11 px on average.
 
 <details>
 <summary>Reproduce</summary>
@@ -249,11 +172,9 @@ python3 tools/parity_compare.py --ref ref.jsonl --test fp16.jsonl \
 python3 tools/coco_eval_dump.py --ann instances_val2017.json --dump coco_fp16.jsonl
 ```
 
-Rerun after re-exporting a model or upgrading TensorRT.
-
 </details>
 
 ## Acknowledgments
 
-Multi-object tracking (ByteTrack, BoT-SORT, OC-SORT) comes from
+Tracking (ByteTrack, BoT-SORT, OC-SORT) comes from
 [motcpp](https://github.com/Geekgineer/motcpp).
